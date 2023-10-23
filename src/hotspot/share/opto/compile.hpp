@@ -807,18 +807,15 @@ private:
     return (r == _failure_reason) || (r != nullptr && _failure_reason != nullptr && strcmp(r, _failure_reason) == 0);
   }
 
-  void record_failure(const char* reason);
-  void record_method_not_compilable(const char* reason) {
+  void record_failure__(const char* reason);
+  void record_method_not_compilable__(const char* reason) {
     env()->record_method_not_compilable(reason);
     // Record failure reason.
-    record_failure(reason);
+    record_failure__(reason);
   }
-  bool check_node_count(uint margin, const char* reason) {
+  void check_node_count__(uint margin, const char* reason) {
     if (live_nodes() + margin > max_node_limit()) {
-      record_method_not_compilable(reason);
-      return true;
-    } else {
-      return false;
+      record_method_not_compilable__(reason);
     }
   }
 
@@ -1158,7 +1155,7 @@ private:
   // Phase control:
   void Init(bool aliasing);                      // Prepare for a single compilation
   void Optimize();                               // Given a graph, optimize it
-  void Code_Gen();                               // Generate code from a graph
+  void Code_Gen__();                               // Generate code from a graph
 
   // Management of the AliasType table.
   void grow_alias_types();
