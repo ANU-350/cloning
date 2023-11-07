@@ -2178,6 +2178,43 @@ public sealed interface MemorySegment permits AbstractMemorySegmentImpl {
     }
 
     /**
+     * {@return a 64-bit {@code long} hash of the contents in the provided {@code segment}
+     * from the provided {@code fromOffset} (inclusive) to the provided {@code toOffset} (exclusive)}
+     * <p>
+     * The general contract of this method is:
+     * <ul>
+     * <li>Whenever invoked on the same segment with the same offset parameters (i.e. region)
+     *     more than once during an execution of a Java application, the method
+     *     consistently return the same long value, provided no information
+     *     in the segment's region is modified.
+     * <li>Whenever invoked on different segments with regions who's sizes and contents are equal,
+     *     during an execution of a Java application, the method will constantly return the same long value.
+     * <li>The returned long value need not remain consistent from one execution of an
+     *     application to another execution of the same application.
+     *</ul>
+     * <p>
+     * Applications utilizing {@code int} values as hash codes (e.g. when implementing a {@linkplain Object#hashCode()}
+     * method) can provide the returned {@code long} value to the method {@linkplain Long#hashCode(long)} thereby
+     * obtaining a well distributed {@code int} hash value.
+     *
+     * @param segment the segment to use for hash computation.
+     * @param fromOffset the offset (inclusive) of the first byte in the source segment to be used.
+     * @param toOffset the offset (exclusive) of the last byte in the source segment to be used.
+     * @throws IllegalStateException if the {@linkplain #scope() scope} associated with {@code segment} is not
+     * {@linkplain Scope#isAlive() alive}.
+     * @throws WrongThreadException if this method is called from a thread {@code T},
+     * such that {@code srcSegment.isAccessibleBy(T) == false}.
+     * @throws IndexOutOfBoundsException if {@code fromOffset < 0}, {@code toOffset < fromOffset} or
+     * {@code toOffset > segment.byteSize()}
+     *
+     * @see Object#hashCode()
+     * @see Long#hashCode(long)
+     */
+    static long contentHash(MemorySegment segment, long fromOffset, long toOffset) {
+        return AbstractMemorySegmentImpl.hash(segment, fromOffset, toOffset);
+    }
+
+    /**
      * A scope models the <em>lifetime</em> of all the memory segments associated with it. That is, a memory segment
      * cannot be accessed if its associated scope is not {@linkplain #isAlive() alive}. Scope instances can be compared
      * for equality. That is, two scopes are considered {@linkplain #equals(Object) equal} if they denote the same lifetime.

@@ -24,6 +24,8 @@
  */
 package jdk.internal.util;
 
+import java.lang.foreign.MemorySegment;
+import java.lang.foreign.ValueLayout;
 import java.util.Arrays;
 import java.util.Collection;
 import jdk.internal.access.JavaLangAccess;
@@ -209,6 +211,29 @@ public class ArraysSupport {
             case T_INT -> hashCode(initialValue, (int[]) array, fromIndex, length);
                 default -> throw new IllegalArgumentException("unrecognized basic type: " + basicType);
         };
+    }
+
+    /**
+     * Calculate the hash code for a memory segment in a way that enables efficient
+     * vectorization.
+     *
+     * <p>This method does not perform bounds checks.  It is the
+     * responsibility of the caller to perform such checks before calling this
+     * method.
+     *
+     * @param result initial hash value (start value)
+     * @param segment for which to calculate hash code
+     * @param from start offset (inclusive)
+     * @param to stop offset (non-inclusive)
+     *
+     * @return the calculated hash value
+     */
+    // Todo: Make this an @IntrinsicCandidate
+    public static long vectorizedHash(long result, MemorySegment segment, long from, long to) {
+        for (long i = from; i < to; i++) {
+            result = 31 * result + (segment.get(ValueLayout.JAVA_BYTE, i) & 0xff);
+        }
+        return result;
     }
 
     private static int signedHashCode(int result, byte[] a, int fromIndex, int length) {
