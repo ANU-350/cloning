@@ -204,6 +204,29 @@ void ConstraintCastNode::dump_spec(outputStream *st) const {
 }
 #endif
 
+// Similar to ConvI2LNode::Value() for the same reasons
+// see if we can remove type assertion after loop opts
+template <class CT>
+static const Type* widen_type_after_loop_opts(const CT* t, const CT* t1, const PhaseGVN* phase) {
+  using T = std::remove_const_t<decltype(CT::_lo)>;
+
+  if (!phase->C->post_loop_opts_phase()) {
+    return t;
+  }
+
+  assert(t1->contains(t), "");
+  if (t1->properly_contains(t)) {
+    T lo = t->_lo >= 0 ? 0 : std::numeric_limits<T>::min();
+    T hi = t->_hi < 0 ? -1 : std::numeric_limits<T>::max();
+    return CT::make(MAX2(t1->_lo, lo),
+                    MIN2(t1->_hi, hi),
+                    t1->_ulo, t1->_uhi, t1->_zeros, t1->_ones,
+                    MAX2(t1->_widen, t->_widen));
+  }
+
+  return t;
+}
+
 const Type* CastIINode::Value(PhaseGVN* phase) const {
   const Type *res = ConstraintCastNode::Value(phase);
   if (res == Type::TOP) {
@@ -211,14 +234,11 @@ const Type* CastIINode::Value(PhaseGVN* phase) const {
   }
   assert(res->isa_int(), "res must be int");
 
-  // Similar to ConvI2LNode::Value() for the same reasons
-  // see if we can remove type assertion after loop opts
-  // But here we have to pay extra attention:
   // Do not narrow the type of range check dependent CastIINodes to
   // avoid corruption of the graph if a CastII is replaced by TOP but
   // the corresponding range check is not removed.
   if (!_range_check_dependency) {
-    res = widen_type(phase, res, T_INT);
+    res = widen_type_after_loop_opts(res->is_int(), phase->type(in(1))->is_int(), phase);
   }
 
   return res;
@@ -297,7 +317,7 @@ const Type* CastLLNode::Value(PhaseGVN* phase) const {
   }
   assert(res->isa_long(), "res must be long");
 
-  return widen_type(phase, res, T_LONG);
+  return res = widen_type_after_loop_opts(res->is_long(), phase->type(in(1))->is_long(), phase);
 }
 
 Node* CastLLNode::Ideal(PhaseGVN* phase, bool can_reshape) {
@@ -318,10 +338,10 @@ Node* CastLLNode::Ideal(PhaseGVN* phase, bool can_reshape) {
     if (t != Type::TOP && t_in != Type::TOP) {
       const TypeLong* tl = t->is_long();
       const TypeLong* t_in_l = t_in->is_long();
-      assert(tl->_lo >= t_in_l->_lo && tl->_hi <= t_in_l->_hi, "CastLL type should be narrower than or equal to the type of its input");
-      assert((tl != t_in_l) == (tl->_lo > t_in_l->_lo || tl->_hi < t_in_l->_hi), "if type differs then this nodes's type must be narrower");
+      assert(t_in_l->contains(tl), "CastLL type should be narrower than or equal to the type of its input");
       if (tl != t_in_l) {
-        const TypeInt* ti = TypeInt::make(checked_cast<jint>(tl->_lo), checked_cast<jint>(tl->_hi), tl->_widen);
+        assert(t_in_l->properly_contains(tl), "if type differs then this nodes's type must be narrower");
+        const TypeInt* ti = TypeInt::make(checked_cast<jint>(tl->_lo), checked_cast<jint>(tl->_hi), tl->_widen)->is_int();
         Node* castii = phase->transform(new CastIINode(in(0), in1->in(1), ti));
         Node* convi2l = in1->clone();
         convi2l->set_req(1, castii);
@@ -472,7 +492,11 @@ Node* ConstraintCastNode::make_cast_for_type(Node* c, Node* in, const Type* type
 
 Node* ConstraintCastNode::optimize_integer_cast(PhaseGVN* phase, BasicType bt) {
   PhaseIterGVN *igvn = phase->is_IterGVN();
-  const TypeInteger* this_type = this->type()->is_integer(bt);
+  const TypeInteger* this_type = this->type()->isa_integer(bt);
+  if (this_type == nullptr) {
+    return nullptr;
+  }
+
   Node* z = in(1);
   const TypeInteger* rx = nullptr;
   const TypeInteger* ry = nullptr;
@@ -499,32 +523,4 @@ Node* ConstraintCastNode::optimize_integer_cast(PhaseGVN* phase, BasicType bt) {
     return nullptr;
   }
   return nullptr;
-}
-
-const Type* ConstraintCastNode::widen_type(const PhaseGVN* phase, const Type* res, BasicType bt) const {
-  if (!phase->C->post_loop_opts_phase()) {
-    return res;
-  }
-  const TypeInteger* this_type = res->is_integer(bt);
-  const TypeInteger* in_type = phase->type(in(1))->isa_integer(bt);
-  if (in_type != nullptr &&
-      (in_type->lo_as_long() != this_type->lo_as_long() ||
-       in_type->hi_as_long() != this_type->hi_as_long())) {
-    jlong lo1 = this_type->lo_as_long();
-    jlong hi1 = this_type->hi_as_long();
-    int w1 = this_type->_widen;
-    if (lo1 >= 0) {
-      // Keep a range assertion of >=0.
-      lo1 = 0;        hi1 = max_signed_integer(bt);
-    } else if (hi1 < 0) {
-      // Keep a range assertion of <0.
-      lo1 = min_signed_integer(bt); hi1 = -1;
-    } else {
-      lo1 = min_signed_integer(bt); hi1 = max_signed_integer(bt);
-    }
-    return TypeInteger::make(MAX2(in_type->lo_as_long(), lo1),
-                             MIN2(in_type->hi_as_long(), hi1),
-                             MAX2((int)in_type->_widen, w1), bt);
-  }
-  return res;
 }

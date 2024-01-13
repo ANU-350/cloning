@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2022, 2023, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -27,7 +27,7 @@ import compiler.lib.ir_framework.*;
 
 /*
  * @test
- * @bug 8267265
+ * @bug 8267265 8315066
  * @summary Test that Ideal transformations of SubINode* are being performed as expected.
  * @library /test/lib /
  * @run driver compiler.c2.irTests.SubINodeIdealizationTests
@@ -43,7 +43,10 @@ public class SubINodeIdealizationTests {
                  "test10", "test11", "test12",
                  "test13", "test14", "test15",
                  "test16", "test17", "test18",
-                 "test19", "test20", "test21"})
+                 "test19", "test20", "test21",
+                 "test22", "test23", "test24",
+                 "test25", "test26", "test27",
+                 "test28"})
     public void runMethod() {
         int a = RunInfo.getRandom().nextInt();
         int b = RunInfo.getRandom().nextInt();
@@ -81,6 +84,17 @@ public class SubINodeIdealizationTests {
         Asserts.assertEQ(a*b - b*c        , test19(a, b, c));
         Asserts.assertEQ(a*c - b*c        , test20(a, b, c));
         Asserts.assertEQ(a*b - c*a        , test21(a, b, c));
+        Asserts.assertEQ((a >> 2) - (b >> 2) > Integer.MIN_VALUE >> 1 &&
+                (a >> 2) - (b >> 2) <= Integer.MAX_VALUE >> 1 ? 1 : 0, test22(a, b));
+        Asserts.assertEQ((a | Integer.MIN_VALUE) - (b >>> 1) < 0 ? 1 : 0, test23(a, b));
+        Asserts.assertEQ(((a | Integer.MIN_VALUE) >>> 1) -
+                ((b >>> 2)| Integer.MIN_VALUE) < 0 ? 1 : 0, test24(a, b));
+        Asserts.assertEQ(Integer.compareUnsigned((a | (Integer.MIN_VALUE >> 1)) -
+                (b >>> 1), Integer.MIN_VALUE >>> 1) > 0 ? 1 : 0, test25(a, b));
+        Asserts.assertEQ(Integer.compareUnsigned((a >>> 1) - (b >>> 1), Integer.MIN_VALUE) < 0 ? 1 : 0, test26(a, b));
+        Asserts.assertEQ(Integer.compareUnsigned((a >>> 1) -
+                (b | (Integer.MIN_VALUE >> 1)), Integer.MIN_VALUE >> 1) <= 0 ? 1 : 0, test27(a, b));
+        Asserts.assertEQ(((a << 5) - (b << 5)) & 31, test28(a, b));
     }
 
     @Test
@@ -248,5 +262,60 @@ public class SubINodeIdealizationTests {
     // Checks a*b-c*a => a*(b-c)
     public int test21(int a, int b, int c) {
         return a*b - c*a;
+    }
+
+    @Test
+    @IR(failOn = {IRNode.SUB_I, IRNode.RSHIFT_I})
+    // Signed bounds
+    public int test22(int a, int b) {
+        int sum = (a >> 2) - (b >> 2);
+        return sum > Integer.MIN_VALUE >> 1 && sum <= Integer.MAX_VALUE >> 1 ? 1 : 0;
+    }
+
+    @Test
+    @IR(counts = {IRNode.SUB_I, "1"})
+    // Signed bounds cannot be inferred if overflow
+    public int test23(int a, int b) {
+        int sum = (a | Integer.MIN_VALUE) - (b >>> 1);
+        return sum < 0 ? 1 : 0;
+    }
+
+    @Test
+    @IR(failOn = {IRNode.SUB_I, IRNode.URSHIFT_I})
+    // Signed bounds, both lo and hi overflow
+    public int test24(int a, int b) {
+        int sum = ((a | Integer.MIN_VALUE) >>> 1) - ((b >>> 2)| Integer.MIN_VALUE);
+        return sum < 0 ? 1 : 0;
+    }
+
+    @Test
+    @IR(failOn = {IRNode.SUB_I, IRNode.URSHIFT_I})
+    // Unsigned bounds
+    public int test25(int a, int b) {
+        int sum = (a | (Integer.MIN_VALUE >> 1)) - (b >>> 1);
+        return Integer.compareUnsigned(sum, Integer.MIN_VALUE >>> 1) > 0 ? 1 : 0;
+    }
+
+    @Test
+    @IR(counts = {IRNode.SUB_I, "1"})
+    // Unsigned bounds cannot be inferred if overflow
+    public int test26(int a, int b) {
+        int sum = (a >>> 1) - (b >>> 1);
+        return Integer.compareUnsigned(sum, Integer.MIN_VALUE) < 0 ? 1 : 0;
+    }
+
+    @Test
+    @IR(failOn = {IRNode.SUB_I, IRNode.URSHIFT_I})
+    // Unsigned bounds, both ulo and uhi overflow
+    public int test27(int a, int b) {
+        int sum = (a >>> 1) - (b | (Integer.MIN_VALUE >> 1));
+        return Integer.compareUnsigned(sum, Integer.MIN_VALUE >> 1) <= 0 ? 1 : 0;
+    }
+
+    @Test
+    @IR(failOn = {IRNode.SUB_I, IRNode.LSHIFT_I})
+    // Bits
+    public int test28(int a, int b) {
+        return ((a << 5) - (b << 5)) & 31;
     }
 }

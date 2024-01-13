@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022, 2023, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2023, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -22,24 +22,23 @@
  */
 package compiler.c2.irTests;
 
-import jdk.test.lib.Asserts;
 import compiler.lib.ir_framework.*;
+import jdk.test.lib.Asserts;
 
 /*
  * @test
- * @bug 8297384 8315066
- * @summary Test that Ideal transformations of URShiftINode* are being performed as expected.
+ * @bug 8315066
+ * @summary Test that Ideal transformations of OrINode* are being performed as expected.
  * @library /test/lib /
- * @run driver compiler.c2.irTests.URShiftINodeIdealizationTests
+ * @run driver compiler.c2.irTests.OrINodeIdealizationTests
  */
-public class URShiftINodeIdealizationTests {
-
+public class OrINodeIdealizationTests {
     public static void main(String[] args) {
         TestFramework.run();
     }
 
     @Run(test = {"test1", "test2", "test3",
-                 "test4", "test5"})
+                 "test4"})
     public void runMethod() {
         int a = RunInfo.getRandom().nextInt();
         int b = RunInfo.getRandom().nextInt();
@@ -55,44 +54,38 @@ public class URShiftINodeIdealizationTests {
 
     @DontCompile
     public void assertResult(int a, int b) {
-        Asserts.assertEQ((a << 2022) >>> 2022, test1(a));
-        Asserts.assertEQ((a >> 2022) >>> 31, test2(a));
+        Asserts.assertEQ(b | 15, test1(a, b));
+        Asserts.assertEQ(0, test2(a, b));
         Asserts.assertEQ(1, test3(a, b));
         Asserts.assertEQ(1, test4(a, b));
-        Asserts.assertEQ(0, test5(a, b));
     }
 
     @Test
-    @IR(failOn = { IRNode.LSHIFT, IRNode.URSHIFT })
-    @IR(counts = { IRNode.AND, "1" })
-    // Checks (x << 2022) >>> 2022 => x & C where C = ((1 << (32 - 6)) - 1)
-    public int test1(int x) {
-        return (x << 2022) >>> 2022;
+    @IR(failOn = {IRNode.AND_I})
+    @IR(counts = {IRNode.OR_I, "1"})
+    // All bits that can be set in one operand is known to be set in the other
+    public int test1(int x, int y) {
+        return (x & 7) | (y | 15);
     }
 
     @Test
-    @IR(failOn = { IRNode.RSHIFT })
-    @IR(counts = { IRNode.URSHIFT, "1" })
-    // Checks (x >> 2022) >>> 31 => x >>> 31
-    public int test2(int x) {
-        return (x >> 2022) >>> 31;
+    @IR(failOn = {IRNode.OR_I, IRNode.AND_I})
+    // Bits unset in both are unset in the result
+    public int test2(int x, int y) {
+        return ((x & -2) | (y & -6)) & 1;
     }
 
     @Test
-    @IR(failOn = {IRNode.URSHIFT_I})
+    @IR(failOn = {IRNode.OR_I})
+    // Bits set in either are set in the result
     public int test3(int x, int y) {
-        return (Math.max(x, -100) >>> y) >= -100 ? 1 : 0;
+        return (x | (y | 5)) & 1;
     }
 
     @Test
-    @IR(failOn = {IRNode.URSHIFT_I})
+    @IR(failOn = {IRNode.OR_I})
+    // The unsigned value of the result is larger than both operands
     public int test4(int x, int y) {
-        return Integer.compareUnsigned(x >>> (y | 8), (-1 >>> 8) + 1) < 0 ? 1 : 0;
-    }
-
-    @Test
-    @IR(failOn = {IRNode.URSHIFT_I})
-    public int test5(int x, int y) {
-        return (x >>> (y | 2)) & (Integer.MIN_VALUE >>> 1);
+        return Integer.compareUnsigned(((byte)x + 150) | y, 20) > 0 ? 1 : 0;
     }
 }

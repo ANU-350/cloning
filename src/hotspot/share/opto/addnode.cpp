@@ -445,36 +445,6 @@ Node* AddINode::Identity(PhaseGVN* phase) {
   return AddNode::Identity(phase);
 }
 
-
-//------------------------------add_ring---------------------------------------
-// Supplied function returns the sum of the inputs.  Guaranteed never
-// to be passed a TOP or BOTTOM type, these are filtered out by
-// pre-check.
-const Type *AddINode::add_ring( const Type *t0, const Type *t1 ) const {
-  const TypeInt *r0 = t0->is_int(); // Handy access
-  const TypeInt *r1 = t1->is_int();
-  int lo = java_add(r0->_lo, r1->_lo);
-  int hi = java_add(r0->_hi, r1->_hi);
-  if( !(r0->is_con() && r1->is_con()) ) {
-    // Not both constants, compute approximate result
-    if( (r0->_lo & r1->_lo) < 0 && lo >= 0 ) {
-      lo = min_jint; hi = max_jint; // Underflow on the low side
-    }
-    if( (~(r0->_hi | r1->_hi)) < 0 && hi < 0 ) {
-      lo = min_jint; hi = max_jint; // Overflow on the high side
-    }
-    if( lo > hi ) {               // Handle overflow
-      lo = min_jint; hi = max_jint;
-    }
-  } else {
-    // both constants, compute precise result using 'lo' and 'hi'
-    // Semantics define overflow and underflow for integer addition
-    // as expected.  In particular: 0x80000000 + 0x80000000 --> 0x0
-  }
-  return TypeInt::make( lo, hi, MAX2(r0->_widen,r1->_widen) );
-}
-
-
 //=============================================================================
 //------------------------------Idealize---------------------------------------
 Node* AddLNode::Ideal(PhaseGVN* phase, bool can_reshape) {
@@ -493,35 +463,50 @@ Node* AddLNode::Identity(PhaseGVN* phase) {
   return AddNode::Identity(phase);
 }
 
+template <class CT>
+static const Type* add_add_ring(const Type* t1, const Type* t2) {
+  using T = std::remove_const_t<decltype(CT::_lo)>;
+  using U = std::remove_const_t<decltype(CT::_ulo)>;
+  constexpr juint W = sizeof(T) * 8;
+  const CT* i1 = CT::cast(t1);
+  const CT* i2 = CT::cast(t2);
 
-//------------------------------add_ring---------------------------------------
-// Supplied function returns the sum of the inputs.  Guaranteed never
-// to be passed a TOP or BOTTOM type, these are filtered out by
-// pre-check.
-const Type *AddLNode::add_ring( const Type *t0, const Type *t1 ) const {
-  const TypeLong *r0 = t0->is_long(); // Handy access
-  const TypeLong *r1 = t1->is_long();
-  jlong lo = java_add(r0->_lo, r1->_lo);
-  jlong hi = java_add(r0->_hi, r1->_hi);
-  if( !(r0->is_con() && r1->is_con()) ) {
-    // Not both constants, compute approximate result
-    if( (r0->_lo & r1->_lo) < 0 && lo >= 0 ) {
-      lo =min_jlong; hi = max_jlong; // Underflow on the low side
-    }
-    if( (~(r0->_hi | r1->_hi)) < 0 && hi < 0 ) {
-      lo = min_jlong; hi = max_jlong; // Overflow on the high side
-    }
-    if( lo > hi ) {               // Handle overflow
-      lo = min_jlong; hi = max_jlong;
-    }
-  } else {
-    // both constants, compute precise result using 'lo' and 'hi'
-    // Semantics define overflow and underflow for integer addition
-    // as expected.  In particular: 0x80000000 + 0x80000000 --> 0x0
+  T lo = U(i1->_lo) + U(i2->_lo);
+  T hi = U(i1->_hi) + U(i2->_hi);
+  bool lo_novf = i2->_lo < 0 && lo >= i1->_lo;
+  bool hi_novf = i2->_hi < 0 && hi >= i1->_hi;
+  bool lo_povf = i2->_lo > 0 && lo <= i1->_lo;
+  bool hi_povf = i2->_hi > 0 && hi <= i1->_hi;
+  if ((lo_novf && !hi_novf) || (hi_povf && !lo_povf)) {
+    lo = std::numeric_limits<T>::min();
+    hi = std::numeric_limits<T>::max();
   }
-  return TypeLong::make( lo, hi, MAX2(r0->_widen,r1->_widen) );
+
+  U ulo = i1->_ulo + i2->_ulo;
+  U uhi = i1->_uhi + i2->_uhi;
+  bool lo_uovf = ulo < i1->_ulo;
+  bool hi_uovf = uhi < i1->_uhi;
+  if (hi_uovf && !lo_uovf) {
+    ulo = 0;
+    uhi = std::numeric_limits<U>::max();
+  }
+
+  U min = i1->_ones + i2->_ones;
+  U max = ~i1->_zeros + ~i2->_zeros;
+  U known = (min ^~ max) & (i1->_zeros | i1->_ones) & (i2->_zeros | i2->_ones);
+  U zeros = known &~ min;
+  U ones = known & min;
+
+  return CT::make(lo, hi, ulo, uhi, zeros, ones, MAX2(i1->_widen, i2->_widen));
 }
 
+const Type* AddINode::add_ring(const Type* t1, const Type* t2) const {
+  return add_add_ring<TypeInt>(t1, t2);
+}
+
+const Type* AddLNode::add_ring(const Type* t1, const Type* t2) const {
+  return add_add_ring<TypeLong>(t1, t2);
+}
 
 //=============================================================================
 //------------------------------add_of_identity--------------------------------
@@ -753,16 +738,6 @@ uint AddPNode::match_edge(uint idx) const {
 }
 
 //=============================================================================
-//------------------------------Identity---------------------------------------
-Node* OrINode::Identity(PhaseGVN* phase) {
-  // x | x => x
-  if (in(1) == in(2)) {
-    return in(1);
-  }
-
-  return AddNode::Identity(phase);
-}
-
 // Find shift value for Integer or Long OR.
 Node* rotate_shift(PhaseGVN* phase, Node* lshift, Node* rshift, int mask) {
   // val << norm_con_shift | val >> ({32|64} - norm_con_shift) => rotate_left val, norm_con_shift
@@ -809,47 +784,6 @@ Node* OrINode::Ideal(PhaseGVN* phase, bool can_reshape) {
   return nullptr;
 }
 
-//------------------------------add_ring---------------------------------------
-// Supplied function returns the sum of the inputs IN THE CURRENT RING.  For
-// the logical operations the ring's ADD is really a logical OR function.
-// This also type-checks the inputs for sanity.  Guaranteed never to
-// be passed a TOP or BOTTOM type, these are filtered out by pre-check.
-const Type *OrINode::add_ring( const Type *t0, const Type *t1 ) const {
-  const TypeInt *r0 = t0->is_int(); // Handy access
-  const TypeInt *r1 = t1->is_int();
-
-  // If both args are bool, can figure out better types
-  if ( r0 == TypeInt::BOOL ) {
-    if ( r1 == TypeInt::ONE) {
-      return TypeInt::ONE;
-    } else if ( r1 == TypeInt::BOOL ) {
-      return TypeInt::BOOL;
-    }
-  } else if ( r0 == TypeInt::ONE ) {
-    if ( r1 == TypeInt::BOOL ) {
-      return TypeInt::ONE;
-    }
-  }
-
-  // If either input is not a constant, just return all integers.
-  if( !r0->is_con() || !r1->is_con() )
-    return TypeInt::INT;        // Any integer, but still no symbols.
-
-  // Otherwise just OR them bits.
-  return TypeInt::make( r0->get_con() | r1->get_con() );
-}
-
-//=============================================================================
-//------------------------------Identity---------------------------------------
-Node* OrLNode::Identity(PhaseGVN* phase) {
-  // x | x => x
-  if (in(1) == in(2)) {
-    return in(1);
-  }
-
-  return AddNode::Identity(phase);
-}
-
 Node* OrLNode::Ideal(PhaseGVN* phase, bool can_reshape) {
   int lopcode = in(1)->Opcode();
   int ropcode = in(2)->Opcode();
@@ -875,17 +809,90 @@ Node* OrLNode::Ideal(PhaseGVN* phase, bool can_reshape) {
   return nullptr;
 }
 
-//------------------------------add_ring---------------------------------------
-const Type *OrLNode::add_ring( const Type *t0, const Type *t1 ) const {
-  const TypeLong *r0 = t0->is_long(); // Handy access
-  const TypeLong *r1 = t1->is_long();
+template <class CT>
+static Node* or_id(Node* n, PhaseGVN* phase) {
+  Node* in1 = n->in(1);
+  Node* in2 = n->in(2);
 
-  // If either input is not a constant, just return all integers.
-  if( !r0->is_con() || !r1->is_con() )
-    return TypeLong::LONG;      // Any integer, but still no symbols.
+  // x | x => x
+  if (in1 == in2) {
+    return in1;
+  }
 
-  // Otherwise just OR them bits.
-  return TypeLong::make( r0->get_con() | r1->get_con() );
+  const CT* i1 = CT::try_cast(phase->type(in1));
+  const CT* i2 = CT::try_cast(phase->type(in2));
+  if (i1 == nullptr || i2 == nullptr) {
+    return n;
+  }
+
+  // If all set bits of x are set in y then return y
+  if ((~i1->_zeros & ~i2->_ones) == 0) {
+    return in2;
+  }
+  if ((~i2->_zeros & ~i1->_ones) == 0) {
+    return in1;
+  }
+  return n;
+}
+
+Node* OrINode::Identity(PhaseGVN* phase) {
+  return or_id<TypeInt>(this, phase);
+}
+
+Node* OrLNode::Identity(PhaseGVN* phase) {
+  return or_id<TypeLong>(this, phase);
+}
+
+template <class CT>
+static const Type* or_add_ring(const Type* t1, const Type* t2) {
+  using T = decltype(CT::_lo);
+  using U = decltype(CT::_ulo);
+  const CT* i1 = CT::cast(t1);
+  const CT* i2 = CT::cast(t2);
+
+  // Identity, if all set bits of x are set in y then return y
+  if ((~i1->_zeros & ~i2->_ones) == 0) {
+    return i2;
+  }
+  if ((~i2->_zeros & ~i1->_ones) == 0) {
+    return i1;
+  }
+
+  T lo = std::numeric_limits<T>::min();
+  T hi = std::numeric_limits<T>::max();
+  U ulo = MAX2(i1->_ulo, i2->_ulo);
+  U uhi = std::numeric_limits<U>::max();
+  U zeros = i1->_zeros & i2->_zeros;
+  U ones = i1->_ones | i2->_ones;
+  int w = MAX2(i1->_widen, i2->_widen);
+  return CT::make(lo, hi, ulo, uhi, zeros, ones, w);
+}
+
+template <class CT>
+static const Type* or_value(const Node* in1, const Node* in2, PhaseGVN* phase) {
+  const Type* t1 = phase->type(in1);
+  const Type* t2 = phase->type(in2);
+  if (t1 == Type::TOP || t2 == Type::TOP) {
+    return Type::TOP;
+  }
+
+  return or_add_ring<CT>(t1, t2);
+}
+
+const Type* OrINode::Value(PhaseGVN* phase) const {
+  return or_value<TypeInt>(in(1), in(2), phase);
+}
+
+const Type* OrLNode::Value(PhaseGVN* phase) const {
+  return or_value<TypeLong>(in(1), in(2), phase);
+}
+
+const Type* OrINode::add_ring(const Type* t1, const Type* t2) const {
+  return or_add_ring<TypeInt>(t1, t2);
+}
+
+const Type* OrLNode::add_ring(const Type* t1, const Type* t2) const {
+  return or_add_ring<TypeLong>(t1, t2);
 }
 
 //---------------------------Helper -------------------------------------------
@@ -902,7 +909,6 @@ static bool is_used_in_only_arithmetic(Node* n, BasicType bt) {
 }
 
 //=============================================================================
-//------------------------------Idealize---------------------------------------
 Node* XorINode::Ideal(PhaseGVN* phase, bool can_reshape) {
   Node* in1 = in(1);
   Node* in2 = in(2);
@@ -952,70 +958,6 @@ Node* XorINode::Ideal(PhaseGVN* phase, bool can_reshape) {
   return AddNode::Ideal(phase, can_reshape);
 }
 
-const Type* XorINode::Value(PhaseGVN* phase) const {
-  Node* in1 = in(1);
-  Node* in2 = in(2);
-  const Type* t1 = phase->type(in1);
-  const Type* t2 = phase->type(in2);
-  if (t1 == Type::TOP || t2 == Type::TOP) {
-    return Type::TOP;
-  }
-  // x ^ x ==> 0
-  if (in1->eqv_uncast(in2)) {
-    return add_id();
-  }
-  // result of xor can only have bits sets where any of the
-  // inputs have bits set. lo can always become 0.
-  const TypeInt* t1i = t1->is_int();
-  const TypeInt* t2i = t2->is_int();
-  if ((t1i->_lo >= 0) &&
-      (t1i->_hi > 0)  &&
-      (t2i->_lo >= 0) &&
-      (t2i->_hi > 0)) {
-    // hi - set all bits below the highest bit. Using round_down to avoid overflow.
-    const TypeInt* t1x = TypeInt::make(0, round_down_power_of_2(t1i->_hi) + (round_down_power_of_2(t1i->_hi) - 1), t1i->_widen);
-    const TypeInt* t2x = TypeInt::make(0, round_down_power_of_2(t2i->_hi) + (round_down_power_of_2(t2i->_hi) - 1), t2i->_widen);
-    return t1x->meet(t2x);
-  }
-  return AddNode::Value(phase);
-}
-
-
-//------------------------------add_ring---------------------------------------
-// Supplied function returns the sum of the inputs IN THE CURRENT RING.  For
-// the logical operations the ring's ADD is really a logical OR function.
-// This also type-checks the inputs for sanity.  Guaranteed never to
-// be passed a TOP or BOTTOM type, these are filtered out by pre-check.
-const Type *XorINode::add_ring( const Type *t0, const Type *t1 ) const {
-  const TypeInt *r0 = t0->is_int(); // Handy access
-  const TypeInt *r1 = t1->is_int();
-
-  // Complementing a boolean?
-  if( r0 == TypeInt::BOOL && ( r1 == TypeInt::ONE
-                               || r1 == TypeInt::BOOL))
-    return TypeInt::BOOL;
-
-  if( !r0->is_con() || !r1->is_con() ) // Not constants
-    return TypeInt::INT;        // Any integer, but still no symbols.
-
-  // Otherwise just XOR them bits.
-  return TypeInt::make( r0->get_con() ^ r1->get_con() );
-}
-
-//=============================================================================
-//------------------------------add_ring---------------------------------------
-const Type *XorLNode::add_ring( const Type *t0, const Type *t1 ) const {
-  const TypeLong *r0 = t0->is_long(); // Handy access
-  const TypeLong *r1 = t1->is_long();
-
-  // If either input is not a constant, just return all integers.
-  if( !r0->is_con() || !r1->is_con() )
-    return TypeLong::LONG;      // Any integer, but still no symbols.
-
-  // Otherwise just OR them bits.
-  return TypeLong::make( r0->get_con() ^ r1->get_con() );
-}
-
 Node* XorLNode::Ideal(PhaseGVN* phase, bool can_reshape) {
   Node* in1 = in(1);
   Node* in2 = in(2);
@@ -1037,34 +979,52 @@ Node* XorLNode::Ideal(PhaseGVN* phase, bool can_reshape) {
   return AddNode::Ideal(phase, can_reshape);
 }
 
-const Type* XorLNode::Value(PhaseGVN* phase) const {
-  Node* in1 = in(1);
-  Node* in2 = in(2);
+template <class CT>
+static const Type* xor_add_ring(const Type* t1, const Type* t2) {
+  using T = decltype(CT::_lo);
+  const CT* i1 = CT::cast(t1);
+  const CT* i2 = CT::cast(t2);
+  const Type* res = CT::make_bits((i1->_zeros & i2->_zeros) | (i1->_ones & i2->_ones),
+                                  (i1->_zeros & i2->_ones) | (i1->_ones & i2->_zeros), MAX2(i1->_widen, i2->_widen));
+  // If inputs do not overlap, result cannot be 0
+  if (CT::cast(res)->contains(T(0)) && i1->filter(i2) == Type::TOP) {
+    res = res->filter(CT::NON_ZERO);
+  }
+  return res;
+}
+
+template <class CT>
+static const Type* xor_value(const Node* in1, const Node* in2, PhaseGVN* phase) {
   const Type* t1 = phase->type(in1);
   const Type* t2 = phase->type(in2);
   if (t1 == Type::TOP || t2 == Type::TOP) {
     return Type::TOP;
   }
-  // x ^ x ==> 0
+
   if (in1->eqv_uncast(in2)) {
-    return add_id();
+    return CT::ZERO;
   }
-  // result of xor can only have bits sets where any of the
-  // inputs have bits set. lo can always become 0.
-  const TypeLong* t1l = t1->is_long();
-  const TypeLong* t2l = t2->is_long();
-  if ((t1l->_lo >= 0) &&
-      (t1l->_hi > 0)  &&
-      (t2l->_lo >= 0) &&
-      (t2l->_hi > 0)) {
-    // hi - set all bits below the highest bit. Using round_down to avoid overflow.
-    const TypeLong* t1x = TypeLong::make(0, round_down_power_of_2(t1l->_hi) + (round_down_power_of_2(t1l->_hi) - 1), t1l->_widen);
-    const TypeLong* t2x = TypeLong::make(0, round_down_power_of_2(t2l->_hi) + (round_down_power_of_2(t2l->_hi) - 1), t2l->_widen);
-    return t1x->meet(t2x);
-  }
-  return AddNode::Value(phase);
+
+  return xor_add_ring<CT>(t1, t2);
 }
 
+const Type* XorINode::Value(PhaseGVN* phase) const {
+  return xor_value<TypeInt>(in(1), in(2), phase);
+}
+
+const Type* XorLNode::Value(PhaseGVN* phase) const {
+  return xor_value<TypeLong>(in(1), in(2), phase);
+}
+
+const Type* XorINode::add_ring(const Type* t1, const Type* t2) const {
+  return xor_add_ring<TypeInt>(t1, t2);
+}
+
+const Type* XorLNode::add_ring(const Type* t1, const Type* t2) const {
+  return xor_add_ring<TypeLong>(t1, t2);
+}
+
+//=============================================================================
 Node* build_min_max_int(Node* a, Node* b, bool is_max) {
   if (is_max) {
     return new MaxINode(a, b);
@@ -1241,32 +1201,11 @@ Node* MaxINode::Ideal(PhaseGVN* phase, bool can_reshape) {
 }
 
 //=============================================================================
-//------------------------------add_ring---------------------------------------
-// Supplied function returns the sum of the inputs.
-const Type *MaxINode::add_ring( const Type *t0, const Type *t1 ) const {
-  const TypeInt *r0 = t0->is_int(); // Handy access
-  const TypeInt *r1 = t1->is_int();
-
-  // Otherwise just MAX them bits.
-  return TypeInt::make( MAX2(r0->_lo,r1->_lo), MAX2(r0->_hi,r1->_hi), MAX2(r0->_widen,r1->_widen) );
-}
-
-//=============================================================================
 //------------------------------Idealize---------------------------------------
 // MINs show up in range-check loop limit calculations.  Look for
 // "MIN2(x+c0,MIN2(y,x+c1))".  Pick the smaller constant: "MIN2(x+c0,y)"
 Node* MinINode::Ideal(PhaseGVN* phase, bool can_reshape) {
   return IdealI(phase, can_reshape);
-}
-
-//------------------------------add_ring---------------------------------------
-// Supplied function returns the sum of the inputs.
-const Type *MinINode::add_ring( const Type *t0, const Type *t1 ) const {
-  const TypeInt *r0 = t0->is_int(); // Handy access
-  const TypeInt *r1 = t1->is_int();
-
-  // Otherwise just MIN them bits.
-  return TypeInt::make( MIN2(r0->_lo,r1->_lo), MIN2(r0->_hi,r1->_hi), MAX2(r0->_widen,r1->_widen) );
 }
 
 // Collapse the "addition with overflow-protection" pattern, and the symmetrical
@@ -1337,13 +1276,6 @@ Node* fold_subI_no_underflow_pattern(Node* n, PhaseGVN* phase) {
   return nullptr;
 }
 
-const Type* MaxLNode::add_ring(const Type* t0, const Type* t1) const {
-  const TypeLong* r0 = t0->is_long();
-  const TypeLong* r1 = t1->is_long();
-
-  return TypeLong::make(MAX2(r0->_lo, r1->_lo), MAX2(r0->_hi, r1->_hi), MAX2(r0->_widen, r1->_widen));
-}
-
 Node* MaxLNode::Identity(PhaseGVN* phase) {
   const TypeLong* t1 = phase->type(in(1))->is_long();
   const TypeLong* t2 = phase->type(in(2))->is_long();
@@ -1369,13 +1301,6 @@ Node* MaxLNode::Ideal(PhaseGVN* phase, bool can_reshape) {
   return nullptr;
 }
 
-const Type* MinLNode::add_ring(const Type* t0, const Type* t1) const {
-  const TypeLong* r0 = t0->is_long();
-  const TypeLong* r1 = t1->is_long();
-
-  return TypeLong::make(MIN2(r0->_lo, r1->_lo), MIN2(r0->_hi, r1->_hi), MIN2(r0->_widen, r1->_widen));
-}
-
 Node* MinLNode::Identity(PhaseGVN* phase) {
   const TypeLong* t1 = phase->type(in(1))->is_long();
   const TypeLong* t2 = phase->type(in(2))->is_long();
@@ -1399,6 +1324,39 @@ Node* MinLNode::Ideal(PhaseGVN* phase, bool can_reshape) {
     return fold_subI_no_underflow_pattern(this, phase);
   }
   return nullptr;
+}
+
+template <class CT, bool is_max>
+static const Type* minmax_add_ring(const Type* t1, const Type* t2) {
+  using T = decltype(CT::_lo);
+  using U = decltype(CT::_ulo);
+  const CT* i1 = CT::cast(t1);
+  const CT* i2 = CT::cast(t2);
+
+  T lo = is_max ? MAX2(i1->_lo, i2->_lo) : MIN2(i1->_lo, i2->_lo);
+  T hi = is_max ? MAX2(i1->_hi, i2->_hi) : MIN2(i1->_hi, i2->_hi);
+  U ulo = MIN2(i1->_ulo, i2->_ulo);
+  U uhi = MAX2(i1->_uhi, i2->_uhi);
+  U zeros = i1->_zeros & i2->_zeros;
+  U ones = i1->_ones & i2->_ones;
+
+  return CT::make(lo, hi, ulo, uhi, zeros, ones, MAX2(i1->_widen, i2->_widen));
+}
+
+const Type* MinINode::add_ring(const Type* t1, const Type* t2) const {
+  return minmax_add_ring<TypeInt, false>(t1, t2);
+}
+
+const Type* MinLNode::add_ring(const Type* t1, const Type* t2) const {
+  return minmax_add_ring<TypeLong, false>(t1, t2);
+}
+
+const Type* MaxINode::add_ring(const Type* t1, const Type* t2) const {
+  return minmax_add_ring<TypeInt, true>(t1, t2);
+}
+
+const Type* MaxLNode::add_ring(const Type* t1, const Type* t2) const {
+  return minmax_add_ring<TypeLong, true>(t1, t2);
 }
 
 //------------------------------add_ring---------------------------------------

@@ -27,7 +27,7 @@ import compiler.lib.ir_framework.*;
 
 /*
  * @test
- * @bug 8320330
+ * @bug 8320330 8315066
  * @summary Test that RShiftINode optimizations are being performed as expected.
  * @library /test/lib /
  * @run driver compiler.c2.irTests.RShiftINodeIdealizationTests
@@ -37,7 +37,7 @@ public class RShiftINodeIdealizationTests {
         TestFramework.run();
     }
 
-    @Run(test = { "test1", "test2", "test3", "test4" })
+    @Run(test = { "test1", "test2", "test3", "test4", "test5", "test6", "test7" })
     public void runMethod() {
         int a = RunInfo.getRandom().nextInt();
         int b = RunInfo.getRandom().nextInt();
@@ -64,6 +64,9 @@ public class RShiftINodeIdealizationTests {
         Asserts.assertEQ(((x & 127) >> y) >= 0 ? 0 : 1, test2(x, y));
         Asserts.assertEQ(((-(x & 127) - 1) >> y) >= 0 ? 0 : 1, test3(x, y));
         Asserts.assertEQ((x >> 30) > 4 ? 0 : 1, test4(x, y));
+        Asserts.assertEQ(1, test5(x, y));
+        Asserts.assertEQ(1, test6(x, y));
+        Asserts.assertEQ(Integer.MIN_VALUE >> 4, test7(x, y));
     }
 
     @Test
@@ -88,5 +91,23 @@ public class RShiftINodeIdealizationTests {
     @IR(failOn = { IRNode.RSHIFT })
     public int test4(int x, int y) {
         return (x >> 30) > 4 ? 0 : 1;
+    }
+
+    @Test
+    @IR(failOn = {IRNode.RSHIFT_I})
+    public int test5(int x, int y) {
+        return (Math.max(x, -100) >> (y | 3)) >= (-100 >> 3) ? 1 : 0;
+    }
+
+    @Test
+    @IR(failOn = {IRNode.RSHIFT_I})
+    public int test6(int x, int y) {
+        return Integer.compareUnsigned((x >>> 1) >> (y | 8), (Integer.MAX_VALUE >> 8) + 1) < 0 ? 1 : 0;
+    }
+
+    @Test
+    @IR(failOn = {IRNode.RSHIFT_I})
+    public int test7(int x, int y) {
+        return ((x | Integer.MIN_VALUE) >> (y | 8)) & (Integer.MIN_VALUE >> 4);
     }
 }

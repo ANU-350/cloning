@@ -27,7 +27,7 @@ import compiler.lib.ir_framework.*;
 
 /*
  * @test
- * @bug 8297384
+ * @bug 8297384 8315066
  * @summary Test that Ideal transformations of AndINode* are being performed as expected.
  * @library /test/lib /
  * @run driver compiler.c2.irTests.AndINodeIdealizationTests
@@ -38,7 +38,8 @@ public class AndINodeIdealizationTests {
         TestFramework.run();
     }
 
-    @Run(test = { "test1", "test2" })
+    @Run(test = {"test1", "test2", "test3",
+                 "test4", "test5", "test6"})
     public void runMethod() {
         int a = RunInfo.getRandom().nextInt();
         int b = RunInfo.getRandom().nextInt();
@@ -56,6 +57,10 @@ public class AndINodeIdealizationTests {
     public void assertResult(int a, int b) {
         Asserts.assertEQ((0 - a) & 1, test1(a));
         Asserts.assertEQ((~a) & (~b), test2(a, b));
+        Asserts.assertEQ(b << 8, test3(a, b));
+        Asserts.assertEQ(1, test4(a, b));
+        Asserts.assertEQ(0, test5(a, b));
+        Asserts.assertEQ(1, test6(a, b));
     }
 
     @Test
@@ -73,5 +78,33 @@ public class AndINodeIdealizationTests {
     // Checks (~a) & (~b) => ~(a | b)
     public int test2(int a, int b) {
         return (~a) & (~b);
+    }
+
+    @Test
+    @IR(failOn = {IRNode.AND_I, IRNode.OR_I})
+    // All bits that can be unset in one operand is known to be unset in the other
+    public int test3(int x, int y) {
+        return (x | -256) & (y << 8);
+    }
+
+    @Test
+    @IR(failOn = {IRNode.AND_I, IRNode.OR_I})
+    // Bits set in both are set in the result
+    public int test4(int x, int y) {
+        return ((x | 3) & (y | 101)) & 1;
+    }
+
+    @Test
+    @IR(failOn = {IRNode.AND_I})
+    // Bits unset in either are unset in the result
+    public int test5(int x, int y) {
+        return (x & (y & 6)) & 1;
+    }
+
+    @Test
+    @IR(failOn = {IRNode.AND_I})
+    // The unsigned value of the result is smaller than both operands
+    public int test6(int x, int y) {
+        return Integer.compareUnsigned(((byte)x + 150) & y, 300) < 0 ? 1 : 0;
     }
 }
