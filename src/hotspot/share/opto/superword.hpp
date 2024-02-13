@@ -186,13 +186,83 @@ public:
 // Per node info needed by SuperWord
 class SWNodeInfo {
  public:
-  int         _alignment; // memory alignment for a node
   int         _depth;     // Max expression (DAG) depth from block start
   const Type* _velt_type; // vector element type
   Node_List*  _my_pack;   // pack containing this node
 
-  SWNodeInfo() : _alignment(-1), _depth(0), _velt_type(nullptr), _my_pack(nullptr) {}
+  SWNodeInfo() : _depth(0), _velt_type(nullptr), _my_pack(nullptr) {}
   static const SWNodeInfo initial;
+};
+
+// TODO think about integrating this with VPointer
+class MemReference {
+ private:
+  bool     _is_valid;
+
+  MemNode* _mem;
+
+  Node*    _base;
+  int      _offset;
+  Node*    _invar;
+  int      _scale;
+
+ public:
+  MemReference(MemNode* mem,
+               Node* base,
+               int offset,
+               Node* invar,
+               int scale) :
+    _is_valid(true),
+    _mem(mem),
+    _base(base),
+    _offset(offset),
+    _invar(invar),
+    _scale(scale) {}
+
+  MemReference() :
+    _is_valid(false),
+    _mem(nullptr) {}
+
+  static MemReference make_invalid() { return MemReference(); }
+
+  bool is_valid()       const { return _is_valid; }
+  MemNode* mem()        const { return _mem; }
+  Node* base()          const { return _base; }
+  int offset()          const { return _offset; }
+  Node* invar()         const { return _invar; }
+  int scale()           const { return _scale; }
+
+  // Comparator that compares only "groups", i.e. it groups nodes
+  // that could potentially be packed, and ignores the offset in
+  // the comparison.
+  static int cmp_groups(MemReference* a, MemReference* b) {
+    int cmp_base = a->base()->_idx - b->base()->_idx;
+    if (cmp_base != 0) { return cmp_base; }
+
+    int cmp_opcode = a->mem()->Opcode() - b->mem()->Opcode();
+    if (cmp_opcode != 0) { return cmp_opcode; }
+
+    int cmp_scale = a->scale() - b->scale();
+    if (cmp_scale != 0) { return cmp_scale; }
+
+    int cmp_invar = (a->invar() == nullptr ? 0 : a->invar()->_idx) -
+                    (b->invar() == nullptr ? 0 : b->invar()->_idx);
+    return cmp_invar;
+  }
+
+  // Sort into "groupts", and internal to groups sort by offset,
+  // and by mem idx.
+  static int cmp(MemReference* a, MemReference* b) {
+    int cmp_group = cmp_groups(a, b);
+    if (cmp_group != 0) { return cmp_group; }
+
+    int cmp_offset = a->offset() - b->offset();
+    if (cmp_offset != 0) { return cmp_offset; }
+
+    return a->mem()->_idx - b->mem()->_idx;
+  }
+
+  NOT_PRODUCT( void dump() const; )
 };
 
 // -----------------------------SuperWord---------------------------------
@@ -204,8 +274,6 @@ class SuperWord : public ResourceObj {
   // Arena for small data structures. Large data structures are allocated in
   // VSharedData, and reused over many AutoVectorizations.
   Arena _arena;
-
-  enum consts { top_align = -1, bottom_align = -666 };
 
   GrowableArray<Node_List*> _packset;    // Packs for the current block
 
@@ -269,6 +337,11 @@ class SuperWord : public ResourceObj {
            vloop().vtrace().is_trace(TraceAutoVectorizationTag::SW_ADJACENT_MEMOPS);
   }
 
+  bool is_trace_superword_extend_pairs() const {
+    // Too verbose for TraceSuperWord
+    return vloop().vtrace().is_trace(TraceAutoVectorizationTag::SW_EXTEND_PAIRS);
+  }
+
   bool is_trace_superword_rejections() const {
     return TraceSuperWord ||
            vloop().vtrace().is_trace(TraceAutoVectorizationTag::SW_REJECTIONS);
@@ -297,6 +370,7 @@ class SuperWord : public ResourceObj {
            vloop().vtrace().is_trace(TraceAutoVectorizationTag::SW_MEMORY_SLICES) ||
            vloop().vtrace().is_trace(TraceAutoVectorizationTag::SW_DEPENDENCE_GRAPH) ||
            vloop().vtrace().is_trace(TraceAutoVectorizationTag::SW_ADJACENT_MEMOPS) ||
+           vloop().vtrace().is_trace(TraceAutoVectorizationTag::SW_EXTEND_PAIRS) ||
            vloop().vtrace().is_trace(TraceAutoVectorizationTag::SW_REJECTIONS) ||
            vloop().vtrace().is_trace(TraceAutoVectorizationTag::SW_PACKSET) ||
            vloop().vtrace().is_trace(TraceAutoVectorizationTag::SW_INFO) ||
@@ -332,7 +406,6 @@ class SuperWord : public ResourceObj {
     BasicType bt = velt_basic_type(n);
     return vector_width(n)*type2aelembytes(bt);
   }
-  int get_vw_bytes_special(MemNode* s);
   const MemNode* align_to_ref() const { return _align_to_ref; }
   void set_align_to_ref(const MemNode* m) { _align_to_ref = m; }
 
@@ -348,10 +421,6 @@ class SuperWord : public ResourceObj {
   // should we align vector memory references on this platform?
   bool vectors_should_be_aligned() { return !Matcher::misaligned_vectors_ok() || AlignVector; }
 
-  // memory alignment for a node
-  int alignment(Node* n)                     { return _node_info.adr_at(bb_idx(n))->_alignment; }
-  void set_alignment(Node* n, int a)         { int i = bb_idx(n); grow_node_info(i); _node_info.adr_at(i)->_alignment = a; }
-
   // Max expression (DAG) depth from beginning of the block for each node
   int depth(Node* n) const                   { return _node_info.adr_at(bb_idx(n))->_depth; }
   void set_depth(Node* n, int d)             { int i = bb_idx(n); grow_node_info(i); _node_info.adr_at(i)->_depth = d; }
@@ -362,6 +431,11 @@ class SuperWord : public ResourceObj {
   void set_velt_type(Node* n, const Type* t) { int i = bb_idx(n); grow_node_info(i); _node_info.adr_at(i)->_velt_type = t; }
   bool same_velt_type(Node* n1, Node* n2);
   bool same_memory_slice(MemNode* best_align_to_mem_ref, MemNode* mem_ref) const;
+
+  // Compute the input basic velt type of a node
+  BasicType input_velt_basic_type(const Node* n) const;
+  // Check if output type of def is compatible with input type of use
+  bool is_velt_basic_type_compatible_def_use(const Node* def, const Node* use) const;
 
   // my_pack
  public:
@@ -436,12 +510,22 @@ private:
   void mark_reductions();
   // Extract the superword level parallelism
   bool SLP_extract();
+
   // Find the adjacent memory references and create pack pairs for them.
   void find_adjacent_refs();
-  // Find a memory reference to align the loop induction variable to.
-  MemNode* find_align_to_ref(Node_List &memops, int &idx);
-  // Calculate loop's iv adjustment for this memory ops.
-  int get_iv_adjustment(MemNode* mem);
+  // Get (maybe valid) reference for a memory node
+  MemReference get_mem_reference(MemNode* mem) const;
+
+  // Pair accessors: TODO
+  void add_pair(Node* s1, Node* s2) {
+    assert(!exists_at(s1, 0), "s1 not on left yet");
+    assert(!exists_at(s2, 1), "s1 not on right yet");
+    Node_List* pair = new (arena()) Node_List(arena(), 2);
+    pair->push(s1);
+    pair->push(s2);
+    _packset.append(pair);
+  }
+
   // Construct dependency graph.
   void dependence_graph();
 
@@ -451,8 +535,8 @@ private:
   // Return a memory slice (node list) in predecessor order starting at "start"
   void mem_slice_preds(Node* start, Node* stop, GrowableArray<Node*> &preds);
 
-  // Can s1 and s2 be in a pack with s1 immediately preceding s2 and  s1 aligned at "align"
-  bool stmts_can_pack(Node* s1, Node* s2, int align);
+  // Check if two nodes can be packed into a pair.
+  bool can_pack_into_pair(Node* s1, Node* s2);
   // Does s exist in a pack at position pos?
   bool exists_at(Node* s, uint pos);
   // Is s1 immediately before s2 in memory?
@@ -468,11 +552,10 @@ private:
   bool have_similar_inputs(Node* s1, Node* s2);
   // Is there a data path between s1 and s2 and both are reductions?
   bool reduction(Node* s1, Node* s2);
-  void set_alignment(Node* s1, Node* s2, int align);
   int data_size(Node* s);
   // Extend packset by following use->def and def->use links from pack members.
-  void extend_packlist();
-  int adjust_alignment_for_type_conversion(Node* s, Node* t, int align);
+  void extend_pairs();
+
   // Extend the packset by visiting operand definitions of nodes in pack p
   bool follow_use_defs(Node_List* p);
   // Extend the packset by visiting uses of nodes in pack p
@@ -533,8 +616,6 @@ private:
   // Remove the pack at position pos in the packset
   void remove_pack_at(int pos);
   static LoadNode::ControlDependency control_dependency(Node_List* p);
-  // Alignment within a vector memory reference
-  int memory_alignment(MemNode* s, int iv_adjust);
   // Smallest type containing range of values
   const Type* container_type(Node* n);
   // Ensure that the main loop vectors are aligned by adjusting the pre loop limit.
@@ -542,13 +623,12 @@ private:
   // Is the use of d1 in u1 at the same operand position as d2 in u2?
   bool opnd_positions_match(Node* d1, Node* u1, Node* d2, Node* u2);
 
+#ifndef PRODUCT
   // print methods
-  void print_packset();
-  void print_pack(Node_List* p);
-  void print_bb();
-  void print_stmt(Node* s);
-
-  void packset_sort(int n);
+  void print_packset() const;
+  void print_pack(const Node_List* pack) const;
+  void print_bb() const;
+#endif
 };
 
 #endif // SHARE_OPTO_SUPERWORD_HPP
