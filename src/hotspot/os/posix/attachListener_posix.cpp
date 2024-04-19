@@ -63,9 +63,9 @@
 //    of the client matches this process.
 
 // forward reference
-class NixAttachOperation;
+class PosixAttachOperation;
 
-class NixAttachListener: AllStatic {
+class PosixAttachListener: AllStatic {
  private:
   // the path to which we bind the UNIX domain socket
   static char _path[UNIX_PATH_MAX];
@@ -77,9 +77,12 @@ class NixAttachListener: AllStatic {
   static bool _atexit_registered;
 
   // reads a request from the given connected socket
-  static NixAttachOperation* read_request(int s);
+  static PosixAttachOperation* read_request(int s);
 
- public:
+  // returns true if the credential check succeeds
+  static bool pd_credentials_check(int s);
+
+public:
   enum {
     ATTACH_PROTOCOL_VER = 1                     // protocol version
   };
@@ -110,10 +113,10 @@ class NixAttachListener: AllStatic {
   // write the given buffer to a socket
   static int write_fully(int s, char* buf, size_t len);
 
-  static NixAttachOperation* dequeue();
+  static PosixAttachOperation* dequeue();
 };
 
-class NixAttachOperation: public AttachOperation {
+class PosixAttachOperation: public AttachOperation {
  private:
   // the connection to the client
   int _socket;
@@ -124,16 +127,16 @@ class NixAttachOperation: public AttachOperation {
   void set_socket(int s)                                { _socket = s; }
   int socket() const                                    { return _socket; }
 
-  NixAttachOperation(char* name) : AttachOperation(name) {
+  PosixAttachOperation(char* name) : AttachOperation(name) {
     set_socket(-1);
   }
 };
 
 // statics
-char NixAttachListener::_path[UNIX_PATH_MAX];
-bool NixAttachListener::_has_path;
-volatile int NixAttachListener::_listener = -1;
-bool NixAttachListener::_atexit_registered = false;
+char PosixAttachListener::_path[UNIX_PATH_MAX];
+bool PosixAttachListener::_has_path;
+volatile int PosixAttachListener::_listener = -1;
+bool PosixAttachListener::_atexit_registered = false;
 
 // Supporting class to help split a buffer into individual components
 class ArgumentIterator : public StackObj {
@@ -168,22 +171,22 @@ class ArgumentIterator : public StackObj {
 // bound too.
 extern "C" {
   static void listener_cleanup() {
-    int s = NixAttachListener::listener();
+    int s = PosixAttachListener::listener();
     if (s != -1) {
-      NixAttachListener::set_listener(-1);
+      PosixAttachListener::set_listener(-1);
       ::shutdown(s, SHUT_RDWR);
       ::close(s);
     }
-    if (NixAttachListener::has_path()) {
-      ::unlink(NixAttachListener::path());
-      NixAttachListener::set_path(nullptr);
+    if (PosixAttachListener::has_path()) {
+      ::unlink(PosixAttachListener::path());
+      PosixAttachListener::set_path(nullptr);
     }
   }
 }
 
 // Initialization - create a listener socket and bind it to a file
 
-int NixAttachListener::init() {
+int PosixAttachListener::init() {
   char path[UNIX_PATH_MAX];          // socket file
   char initial_path[UNIX_PATH_MAX];  // socket file during setup
   int listener;                      // listener socket (file descriptor)
@@ -255,9 +258,9 @@ int NixAttachListener::init() {
 // after the peer credentials have been checked and in the worst case it just
 // means that the attach listener thread is blocked.
 //
-NixAttachOperation* NixAttachListener::read_request(int s) {
+PosixAttachOperation* PosixAttachListener::read_request(int s) {
   char ver_str[8];
-  os::snprintf_checked(ver_str, sizeof(ver_str), "%d", ATTACH_PROTOCOL_VER);
+  int ver_str_len = os::snprintf_checked(ver_str, sizeof(ver_str), "%d", ATTACH_PROTOCOL_VER);
 
   // The request is a sequence of strings so we first figure out the
   // expected count and the maximum possible length of the request.
@@ -267,7 +270,7 @@ NixAttachOperation* NixAttachListener::read_request(int s) {
   // name ("load", "datadump", ...), and <arg> is an argument
   int expected_str_count = 2 + AttachOperation::arg_count_max;
   const size_t max_len = (sizeof(ver_str) + 1) + (AttachOperation::name_length_max + 1) +
-    AttachOperation::arg_count_max*(AttachOperation::arg_length_max + 1);
+                         AttachOperation::arg_count_max*(AttachOperation::arg_length_max + 1);
 
   char buf[max_len];
   int str_count = 0;
@@ -289,21 +292,20 @@ NixAttachOperation* NixAttachListener::read_request(int s) {
     if (n == 0) {
       break;
     }
-    for (ssize_t i=0; i<n; i++) {
-      if (buf[off+i] == 0) {
-        // EOS found
-        str_count++;
+    ssize_t len = ::strnlen(&buf[off], n);
+    if (len < n) {
+      // EOS found
+      str_count++;
 
-        // The first string is <ver> so check it now to
-        // check for protocol mismatch
-        if (str_count == 1) {
-          if ((strlen(buf) != strlen(ver_str)) ||
-              (atoi(buf) != ATTACH_PROTOCOL_VER)) {
-            char msg[32];
-            os::snprintf_checked(msg, sizeof(msg), "%d\n", ATTACH_ERROR_BADVERSION);
-            write_fully(s, msg, strlen(msg));
-            return nullptr;
-          }
+      // The first string is <ver> so check it now to
+      // check for protocol mismatch
+      if (str_count == 1) {
+        int found_ver_str_len = ::strlen(buf);
+        if ((found_ver_str_len != ver_str_len) || (atoi(buf) != ATTACH_PROTOCOL_VER)) {
+          char msg[32];
+          os::snprintf_checked(msg, sizeof(msg), "%d\n", ATTACH_ERROR_BADVERSION);
+          write_fully(s, msg, strlen(msg));
+          return nullptr;
         }
       }
     }
@@ -327,7 +329,7 @@ NixAttachOperation* NixAttachListener::read_request(int s) {
     return nullptr;
   }
 
-  NixAttachOperation* op = new NixAttachOperation(name);
+  PosixAttachOperation* op = new PosixAttachOperation(name);
 
   for (int i=0; i<AttachOperation::arg_count_max; i++) {
     char* arg = args.next();
@@ -351,7 +353,7 @@ NixAttachOperation* NixAttachListener::read_request(int s) {
 // In the Linux and BSD implementations, there is only a single operation and
 // clients cannot queue commands (except at the socket level).
 //
-NixAttachOperation* NixAttachListener::dequeue() {
+PosixAttachOperation* PosixAttachListener::dequeue() {
   for (;;) {
     int s;
 
@@ -364,43 +366,13 @@ NixAttachOperation* NixAttachListener::dequeue() {
     }
 
     // get the credentials of the peer and check the effective uid/guid
-#ifdef LINUX
-    struct ucred cred_info;
-    socklen_t optlen = sizeof(cred_info);
-    if (::getsockopt(s, SOL_SOCKET, SO_PEERCRED, (void *)&cred_info, &optlen) ==
-        -1) {
-      log_debug(attach)("Failed to get socket option SO_PEERCRED");
+    if (!PosixAttachListener::pd_credentials_check(s)) {
       ::close(s);
       continue;
     }
-
-    if (!os::Posix::matches_effective_uid_and_gid_or_root(cred_info.uid,
-                                                          cred_info.gid)) {
-      log_debug(attach)("euid/egid check failed (%d/%d vs %d/%d)",
-                        cred_info.uid, cred_info.gid, geteuid(), getegid());
-      ::close(s);
-      continue;
-    }
-#endif
-#ifdef BSD
-    uid_t puid;
-    gid_t pgid;
-    if (::getpeereid(s, &puid, &pgid) != 0) {
-      log_debug(attach)("Failed to get peer id");
-      ::close(s);
-      continue;
-    }
-
-    if (!os::Posix::matches_effective_uid_and_gid_or_root(puid, pgid)) {
-      log_debug(attach)("euid/egid check failed (%d/%d vs %d/%d)", puid, pgid,
-                        geteuid(), getegid());
-      ::close(s);
-      continue;
-    }
-#endif
 
     // peer credential look okay so we read the request
-    NixAttachOperation* op = read_request(s);
+    PosixAttachOperation* op = read_request(s);
     if (op == nullptr) {
       ::close(s);
       continue;
@@ -411,7 +383,7 @@ NixAttachOperation* NixAttachListener::dequeue() {
 }
 
 // write the given buffer to the socket
-int NixAttachListener::write_fully(int s, char* buf, size_t len) {
+int PosixAttachListener::write_fully(int s, char* buf, size_t len) {
   do {
     ssize_t n = ::write(s, buf, len);
     if (n == -1) {
@@ -433,18 +405,18 @@ int NixAttachListener::write_fully(int s, char* buf, size_t len) {
 // if there are operations that involves a very big reply then it the
 // socket could be made non-blocking and a timeout could be used.
 
-void NixAttachOperation::complete(jint result, bufferedStream* st) {
+void PosixAttachOperation::complete(jint result, bufferedStream* st) {
   JavaThread* thread = JavaThread::current();
   ThreadBlockInVM tbivm(thread);
 
   // write operation result
   char msg[32];
   os::snprintf_checked(msg, sizeof(msg), "%d\n", result);
-  int rc = NixAttachListener::write_fully(this->socket(), msg, strlen(msg));
+  int rc = PosixAttachListener::write_fully(this->socket(), msg, strlen(msg));
 
   // write any result data
   if (rc == 0) {
-    NixAttachListener::write_fully(this->socket(), (char*) st->base(), st->size());
+    PosixAttachListener::write_fully(this->socket(), (char*) st->base(), st->size());
     ::shutdown(this->socket(), 2);
   }
 
@@ -461,7 +433,7 @@ AttachOperation* AttachListener::dequeue() {
   JavaThread* thread = JavaThread::current();
   ThreadBlockInVM tbivm(thread);
 
-  AttachOperation* op = NixAttachListener::dequeue();
+  AttachOperation* op = PosixAttachListener::dequeue();
 
   return op;
 }
@@ -493,7 +465,7 @@ int AttachListener::pd_init() {
   JavaThread* thread = JavaThread::current();
   ThreadBlockInVM tbivm(thread);
 
-  int ret_code = NixAttachListener::init();
+  int ret_code = PosixAttachListener::init();
 
   return ret_code;
 }
@@ -501,10 +473,10 @@ int AttachListener::pd_init() {
 bool AttachListener::check_socket_file() {
   int ret;
   struct stat st;
-  ret = stat(NixAttachListener::path(), &st);
+  ret = stat(PosixAttachListener::path(), &st);
   if (ret == -1) { // need to restart attach listener.
     log_debug(attach)("Socket file %s does not exist - Restart Attach Listener",
-                      NixAttachListener::path());
+                      PosixAttachListener::path());
 
     listener_cleanup();
 
@@ -579,6 +551,40 @@ void AttachListener::pd_data_dump() {
 void AttachListener::pd_detachall() {
   // do nothing for now
 }
+
+#ifdef LINUX
+bool PosixAttachListener::pd_credentials_check(int s) {
+  struct ucred cred_info;
+  socklen_t optlen = sizeof(cred_info);
+  if (::getsockopt(s, SOL_SOCKET, SO_PEERCRED, (void*)&cred_info, &optlen) == -1) {
+    log_debug(attach)("Failed to get socket option SO_PEERCRED");
+    return false;
+  }
+
+  if (!os::Posix::matches_effective_uid_and_gid_or_root(cred_info.uid, cred_info.gid)) {
+    log_debug(attach)("euid/egid check failed (%d/%d vs %d/%d)", cred_info.uid, cred_info.gid,
+                      geteuid(), getegid());
+    return false;
+  }
+  return true;
+}
+#endif // LINUX
+#ifdef BSD
+bool PosixAttachListener::pd_credentials_check(int s) {
+  uid_t puid;
+  gid_t pgid;
+  if (::getpeereid(s, &puid, &pgid) != 0) {
+    log_debug(attach)("Failed to get peer id");
+    return false
+  }
+
+  if (!os::Posix::matches_effective_uid_and_gid_or_root(puid, pgid)) {
+    log_debug(attach)("euid/egid check failed (%d/%d vs %d/%d)", puid, pgid, geteuid(), getegid());
+    return false;
+  }
+  return true;
+}
+#endif // BSD
 
 #endif // !AIX
 
