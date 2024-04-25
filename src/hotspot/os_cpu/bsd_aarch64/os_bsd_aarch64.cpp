@@ -194,14 +194,24 @@ NOINLINE frame os::current_frame() {
 
 bool PosixSignals::pd_hotspot_signal_handler(int sig, siginfo_t* info,
                                              ucontext_t* uc, JavaThread* thread) {
-  // Enable WXWrite: this function is called by the signal handler at arbitrary
-  // point of execution.
-  ThreadWXEnable wx(WXWrite, thread);
-
   // decide if this trap can be handled by a stub
   address stub = nullptr;
 
   address pc          = nullptr;
+
+  #if defined(__APPLE__) && defined(AARCH64)
+  if (nullptr != uc && nullptr != info && CodeCache::contains(info->si_addr) && sig == SIGBUS){
+    // we can get here from non-java thread
+    pc = (address) os::Posix::ucontext_get_pc(uc);
+    if (pc == info->si_addr){
+      os::current_thread_enable_wx(WXExec);
+    }
+    else{
+      os::current_thread_enable_wx(WXWrite);
+    }
+    return true;
+  }
+  #endif
 
   //%note os_trap_1
   if (info != nullptr && uc != nullptr && thread != nullptr) {

@@ -627,48 +627,8 @@ protected:
   static void SpinAcquire(volatile int * Lock, const char * Name);
   static void SpinRelease(volatile int * Lock);
 
-#if defined(__APPLE__) && defined(AARCH64)
- private:
-  DEBUG_ONLY(bool _wx_init);
-  WXMode _wx_state;
- public:
-  void init_wx();
-  WXMode enable_wx(WXMode new_state);
-
-  void assert_wx_state(WXMode expected) {
-    assert(_wx_state == expected, "wrong state");
-  }
-#endif // __APPLE__ && AARCH64
-
- private:
-  bool _in_asgct = false;
- public:
-  bool in_asgct() const { return _in_asgct; }
-  void set_in_asgct(bool value) { _in_asgct = value; }
-  static bool current_in_asgct() {
-    Thread *cur = Thread::current_or_null_safe();
-    return cur != nullptr && cur->in_asgct();
-  }
-
  private:
   VMErrorCallback* _vm_error_callbacks;
-};
-
-class ThreadInAsgct {
- private:
-  Thread* _thread;
-  bool _saved_in_asgct;
- public:
-  ThreadInAsgct(Thread* thread) : _thread(thread) {
-    assert(thread != nullptr, "invariant");
-    // Allow AsyncGetCallTrace to be reentrant - save the previous state.
-    _saved_in_asgct = thread->in_asgct();
-    thread->set_in_asgct(true);
-  }
-  ~ThreadInAsgct() {
-    assert(_thread->in_asgct(), "invariant");
-    _thread->set_in_asgct(_saved_in_asgct);
-  }
 };
 
 // Inline implementation of Thread::current()
