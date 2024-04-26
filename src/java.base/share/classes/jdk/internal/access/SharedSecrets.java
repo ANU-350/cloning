@@ -92,6 +92,8 @@ public class SharedSecrets {
     private static JavaxCryptoSpecAccess javaxCryptoSpecAccess;
     private static JavaxSecurityAccess javaxSecurityAccess;
 
+    private static JFRAccess jfrAccess;
+
     public static void setJavaUtilCollectionAccess(JavaUtilCollectionAccess juca) {
         javaUtilCollectionAccess = juca;
     }
@@ -527,6 +529,18 @@ public class SharedSecrets {
         if (access == null) {
             ensureClassInitialized(X500Principal.class);
             access = javaxSecurityAccess;
+        }
+        return access;
+    }
+
+    public static void setJFRAccess(JFRAccess access) {
+        jfrAccess = access;
+    }
+
+    public static JFRAccess getJFRAccess() {
+        var access = jfrAccess;
+        if (access == null) {
+            access = JFRAccess.NONE;
         }
         return access;
     }

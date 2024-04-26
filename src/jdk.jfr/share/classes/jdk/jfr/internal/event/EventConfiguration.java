@@ -1,5 +1,6 @@
 /*
- * Copyright (c) 2016, 2022, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2016, 2024, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2024, Datadog, Inc. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -32,6 +33,8 @@ import jdk.jfr.internal.PlatformEventType;
 import jdk.jfr.internal.PrivateAccess;
 import jdk.jfr.SettingControl;
 
+import jdk.jfr.internal.settings.SelectorValue;
+
 // Users should not be able to subclass or instantiate for security reasons.
 public final class EventConfiguration {
     private final PlatformEventType platformEventType;
@@ -59,9 +62,24 @@ public final class EventConfiguration {
         return eventControl;
     }
 
-    // Accessed by generated code in event class
     public boolean shouldCommit(long duration) {
-        return isEnabled() && duration >= platformEventType.getThresholdTicks();
+        return shouldCommit(duration, -1);
+    }
+    // Accessed by generated code in event class
+    public boolean shouldCommit(long duration, long offsetDiff) {
+        if (!isEnabled()) {
+            return false;
+        }
+        boolean shouldCommit = true;
+        if ((getPlatformEventType().getSelector() & SelectorValue.CONTEXT.getValue()) != 0) {
+            // selector="if-context"
+            shouldCommit &= JVM.hasContext();
+        }
+        if (offsetDiff > -1 && (getPlatformEventType().getSelector() & SelectorValue.TRIGGERED.getValue()) != 0) {
+            // selector="if-triggered"
+            shouldCommit &= offsetDiff > 0;
+        }
+        return shouldCommit && duration >= platformEventType.getThresholdTicks();
     }
 
     // Accessed by generated code in event class
