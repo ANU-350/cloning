@@ -81,6 +81,8 @@ public @interface PreviewFeature {
         CLASSFILE_API,
         @JEP(number=473, title="Stream Gatherers", status="Second Preview")
         STREAM_GATHERERS,
+        @JEP(number=468, title="Derived Record Creation", status="Preview")
+        DERIVED_RECORD_CREATION,
         LANGUAGE_MODEL,
         /**
          * A key for testing.

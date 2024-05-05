@@ -621,6 +621,10 @@ public class TreeInfo {
                 JCBindingPattern node = (JCBindingPattern)tree;
                 return getStartPos(node.var);
             }
+            case DERIVEDRECORDCREATION: {
+                JCDerivedInstance node = (JCDerivedInstance) tree;
+                return getStartPos(node.expr);
+            }
             case ERRONEOUS: {
                 JCErroneous node = (JCErroneous)tree;
                 if (node.errs != null && node.errs.nonEmpty()) {

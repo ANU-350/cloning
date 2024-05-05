@@ -1476,6 +1476,17 @@ public class Pretty extends JCTree.Visitor {
         }
     }
 
+    @Override
+    public void visitDerivedInstance(JCDerivedInstance tree) {
+        try {
+            printExpr(tree.expr);
+            print(" with ");
+            printExpr(tree.block);
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
     public void visitTypeIdent(JCPrimitiveTypeTree tree) {
         try {
             switch(tree.typetag) {

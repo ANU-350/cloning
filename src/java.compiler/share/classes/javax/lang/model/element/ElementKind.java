@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2005, 2022, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2005, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,6 +24,8 @@
  */
 
 package javax.lang.model.element;
+
+import jdk.internal.javac.PreviewFeature;
 
 /**
  * The {@code kind} of an element.
@@ -121,7 +123,14 @@ public enum ElementKind {
      * A binding variable in a pattern.
      * @since 16
      */
-    BINDING_VARIABLE;
+    BINDING_VARIABLE,
+
+    /**
+     * A local component variable in a derived record creation expression.
+     * @since 23
+     */
+    @PreviewFeature(feature=PreviewFeature.Feature.DERIVED_RECORD_CREATION, reflective=true)
+    COMPONENT_LOCAL_VARIABLE;
 
     // Maintenance note: check if the default implementation of
     // Elements.getOutermostTypeElement needs updating when new kind
@@ -200,7 +209,8 @@ public enum ElementKind {
      * Returns {@code true} if this is a kind of variable: including
      * {@code ENUM_CONSTANT}, {@code FIELD}, {@code PARAMETER},
      * {@code LOCAL_VARIABLE}, {@code EXCEPTION_PARAMETER},
-     * {@code RESOURCE_VARIABLE}, and {@code BINDING_VARIABLE}.
+     * {@code RESOURCE_VARIABLE}, {@code BINDING_VARIABLE}, and
+     * {@code COMPONENT_LOCAL_VARIABLE}.
      *
      * @return {@code true} if this is a kind of variable
      * @since 19
@@ -209,7 +219,7 @@ public enum ElementKind {
         return switch(this) {
         case ENUM_CONSTANT, FIELD, PARAMETER,
              LOCAL_VARIABLE, EXCEPTION_PARAMETER, RESOURCE_VARIABLE,
-             BINDING_VARIABLE -> true;
+             BINDING_VARIABLE, COMPONENT_LOCAL_VARIABLE -> true;
         default -> false;
         };
     }

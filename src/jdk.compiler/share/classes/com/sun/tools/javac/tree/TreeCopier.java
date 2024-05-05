@@ -349,6 +349,14 @@ public class TreeCopier<P> implements TreeVisitor<JCTree,P> {
     }
 
     @DefinedBy(Api.COMPILER_TREE)
+    public JCTree visitDerivedInstance(DerivedInstanceTree node, P p) {
+        JCDerivedInstance t = (JCDerivedInstance) node;
+        JCExpression expr = copy(t.expr, p);
+        JCBlock block = copy(t.block, p);
+        return M.at(t.pos).DerivedInstance(expr, block);
+    }
+
+    @DefinedBy(Api.COMPILER_TREE)
     public JCTree visitReturn(ReturnTree node, P p) {
         JCReturn t = (JCReturn) node;
         JCExpression expr = copy(t.expr, p);

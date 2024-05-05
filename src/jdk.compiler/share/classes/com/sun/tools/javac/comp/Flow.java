@@ -3211,6 +3211,18 @@ public class Flow {
             initParam(tree.var);
         }
 
+        @Override
+        public void visitDerivedInstance(JCDerivedInstance tree) {
+            scan(tree.expr);
+            int nextadrPrev = nextadr;
+            for (JCVariableDecl component : tree.componentLocalVariableDeclarations) {
+                newVar(component);
+                letInit(tree.pos(), component.sym);
+            }
+            scan(tree.block);
+            nextadr = nextadrPrev;
+        }
+
         void referenced(Symbol sym) {
             unrefdResources.remove(sym);
         }
@@ -3451,6 +3463,17 @@ public class Flow {
                 declaredInsideGuard.enter(tree.sym);
             }
             super.visitVarDef(tree);
+        }
+
+        @Override
+        public void visitDerivedInstance(JCDerivedInstance tree) {
+            if (declaredInsideGuard != null) {
+                tree.componentLocalVariableDeclarations
+                    .stream()
+                    .map(var -> var.sym)
+                    .forEach(declaredInsideGuard::enter);
+            }
+            super.visitDerivedInstance(tree);
         }
 
         @Override
