@@ -38,12 +38,14 @@
 #include "opto/convertnode.hpp"
 #include "opto/divnode.hpp"
 #include "opto/idealGraphPrinter.hpp"
+#include "opto/intrinsicnode.hpp"
 #include "opto/loopnode.hpp"
 #include "opto/movenode.hpp"
 #include "opto/mulnode.hpp"
 #include "opto/opaquenode.hpp"
 #include "opto/predicates.hpp"
 #include "opto/rootnode.hpp"
+#include "opto/scoped_value.hpp"
 #include "opto/runtime.hpp"
 #include "opto/vectorization.hpp"
 #include "runtime/sharedRuntime.hpp"
@@ -4611,7 +4613,7 @@ void PhaseIdealLoop::build_and_optimize() {
   BarrierSetC2* bs = BarrierSet::barrier_set()->barrier_set_c2();
   // Nothing to do, so get out
   bool stop_early = !C->has_loops() && !skip_loop_opts && !do_split_ifs && !do_max_unroll && !_verify_me &&
-          !_verify_only && !bs->is_gc_specific_loop_opts_pass(_mode);
+          !_verify_only && !bs->is_gc_specific_loop_opts_pass(_mode) && !C->has_scoped_value_get_nodes();
   bool do_expensive_nodes = C->should_optimize_expensive_nodes(_igvn);
   bool strip_mined_loops_expanded = bs->strip_mined_loops_expanded(_mode);
   if (stop_early && !do_expensive_nodes) {
@@ -4709,6 +4711,10 @@ void PhaseIdealLoop::build_and_optimize() {
     assert(C->unique() == unique, "verification _mode made Nodes? ? ?");
     assert(_igvn._worklist.size() == orig_worklist_size, "shouldn't push anything");
     return;
+  }
+
+  if (do_split_ifs) {
+    C->set_has_scoped_value_get_nodes(_scoped_value_get_nodes.size() > 0);
   }
 
   // clear out the dead code after build_loop_late
@@ -4821,6 +4827,10 @@ void PhaseIdealLoop::build_and_optimize() {
     C->set_major_progress();
   }
 
+  if (!C->major_progress() && optimize_scoped_value_get_nodes()) {
+    C->set_major_progress();
+  }
+
   // Perform loop predication before iteration splitting
   if (UseLoopPredicate && C->has_loops() && !C->major_progress() && (C->parse_predicate_count() > 0)) {
     _ltree_root->_child->loop_predication(this);
@@ -4881,6 +4891,10 @@ void PhaseIdealLoop::build_and_optimize() {
        tty->print_cr("PredicatesOff");
      }
      C->set_major_progress();
+  }
+
+  if (!C->major_progress() && do_split_ifs && expand_scoped_value_get_nodes()) {
+    C->set_major_progress();
   }
 
   // Auto-vectorize main-loop
@@ -6273,6 +6287,17 @@ void PhaseIdealLoop::build_loop_late_post_work(Node *n, bool pinned) {
 
   if (n->req() == 2 && (n->Opcode() == Op_ConvI2L || n->Opcode() == Op_CastII) && !C->major_progress() && !_verify_only) {
     _igvn._worklist.push(n);  // Maybe we'll normalize it, if no more loops.
+  }
+
+  if (!_verify_only && (n->Opcode() == Op_ScopedValueGetResult || n->Opcode() == Op_ScopedValueGetHitsInCache)) {
+#ifdef ASSERT
+    if (n->Opcode() == Op_ScopedValueGetHitsInCache) {
+      n->as_ScopedValueGetHitsInCache()->verify();
+    } else if (n->Opcode() == Op_ScopedValueGetLoadFromCache) {
+      n->as_ScopedValueGetLoadFromCache()->verify();
+    }
+#endif
+    _scoped_value_get_nodes.push(n);
   }
 
 #ifdef ASSERT

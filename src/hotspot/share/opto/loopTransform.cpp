@@ -481,7 +481,7 @@ void IdealLoopTree::reassociate_invariants(PhaseIdealLoop *phase) {
 // is applicable if we can make a loop-invariant test (usually a null-check)
 // execute before we enter the loop. When TRUE, the estimated node budget is
 // also requested.
-bool IdealLoopTree::policy_peeling(PhaseIdealLoop *phase) {
+bool IdealLoopTree::policy_peeling(PhaseIdealLoop* phase) {
   uint estimate = estimate_peeling(phase);
 
   return estimate == 0 ? false : phase->may_require_nodes(estimate);
@@ -490,29 +490,11 @@ bool IdealLoopTree::policy_peeling(PhaseIdealLoop *phase) {
 // Perform actual policy and size estimate for the loop peeling transform, and
 // return the estimated loop size if peeling is applicable, otherwise return
 // zero. No node budget is allocated.
-uint IdealLoopTree::estimate_peeling(PhaseIdealLoop *phase) {
+uint IdealLoopTree::estimate_peeling(PhaseIdealLoop* phase) {
+  uint estimate = estimate_if_peeling_possible(phase);
 
-  // If nodes are depleted, some transform has miscalculated its needs.
-  assert(!phase->exceeding_node_budget(), "sanity");
-
-  // Peeling does loop cloning which can result in O(N^2) node construction.
-  if (_body.size() > 255) {
-    return 0;   // Suppress too large body size.
-  }
-  // Optimistic estimate that approximates loop body complexity via data and
-  // control flow fan-out (instead of using the more pessimistic: BodySize^2).
-  uint estimate = est_loop_clone_sz(2);
-
-  if (phase->exceeding_node_budget(estimate)) {
-    return 0;   // Too large to safely clone.
-  }
-
-  // Check for vectorized loops, any peeling done was already applied.
-  if (_head->is_CountedLoop()) {
-    CountedLoopNode* cl = _head->as_CountedLoop();
-    if (cl->is_unroll_only() || cl->trip_count() == 1) {
-      return 0;
-    }
+  if (estimate == 0) {
+    return 0;
   }
 
   Node* test = tail();
@@ -540,6 +522,32 @@ uint IdealLoopTree::estimate_peeling(PhaseIdealLoop *phase) {
     test = phase->idom(test);
   }
   return 0;
+}
+
+uint IdealLoopTree::estimate_if_peeling_possible(PhaseIdealLoop* phase) const {
+  // If nodes are depleted, some transform has miscalculated its needs.
+  assert(!phase->exceeding_node_budget(), "sanity");
+
+  // Peeling does loop cloning which can result in O(N^2) node construction.
+  if (_body.size() > 255) {
+    return 0;   // Suppress too large body size.
+  }
+  // Optimistic estimate that approximates loop body complexity via data and
+  // control flow fan-out (instead of using the more pessimistic: BodySize^2).
+  uint estimate = est_loop_clone_sz(2);
+
+  if (phase->exceeding_node_budget(estimate)) {
+    return 0;   // Too large to safely clone.
+  }
+
+  // Check for vectorized loops, any peeling done was already applied.
+  if (_head->is_CountedLoop()) {
+    CountedLoopNode* cl = _head->as_CountedLoop();
+    if (cl->is_unroll_only() || cl->trip_count() == 1) {
+      return 0;
+    }
+  }
+  return estimate;
 }
 
 //------------------------------peeled_dom_test_elim---------------------------
@@ -3719,6 +3727,13 @@ bool IdealLoopTree::iteration_split(PhaseIdealLoop* phase, Node_List &old_new) {
       if (policy_unswitching(phase)) {
         phase->do_unswitching(this, old_new);
         return false; // need to recalculate idom data
+      }
+      // If the loop body has a ScopedValueGetResult for a loop invariant ScopedValue object that dominates the backedge,
+      // then peeling one iteration of the loop body will allow the entire ScopedValue subgraph to be hoisted from the
+      // loop body
+      if (policy_peeling_for_scoped_value(phase)) {
+        phase->do_peeling(this, old_new);
+        return false;
       }
     }
   }

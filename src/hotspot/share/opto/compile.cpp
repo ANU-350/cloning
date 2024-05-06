@@ -407,6 +407,7 @@ void Compile::remove_useless_node(Node* dead) {
     remove_useless_late_inlines(         &_string_late_inlines, dead);
     remove_useless_late_inlines(         &_boxing_late_inlines, dead);
     remove_useless_late_inlines(&_vector_reboxing_late_inlines, dead);
+    remove_useless_late_inlines(   &_scoped_value_late_inlines, dead);
 
     if (dead->is_CallStaticJava()) {
       remove_unstable_if_trap(dead->as_CallStaticJava(), false);
@@ -465,6 +466,7 @@ void Compile::disconnect_useless_nodes(Unique_Node_List& useful, Unique_Node_Lis
   remove_useless_late_inlines(         &_string_late_inlines, useful);
   remove_useless_late_inlines(         &_boxing_late_inlines, useful);
   remove_useless_late_inlines(&_vector_reboxing_late_inlines, useful);
+  remove_useless_late_inlines(   &_scoped_value_late_inlines, useful);
   debug_only(verify_graph_edges(true/*check for no_dead_code*/);)
 }
 
@@ -668,6 +670,7 @@ Compile::Compile( ciEnv* ci_env, ciMethod* target, int osr_bci,
                   _string_late_inlines(comp_arena(), 2, 0, nullptr),
                   _boxing_late_inlines(comp_arena(), 2, 0, nullptr),
                   _vector_reboxing_late_inlines(comp_arena(), 2, 0, nullptr),
+                  _scoped_value_late_inlines(comp_arena(), 2, 0, nullptr),
                   _late_inlines_pos(0),
                   _number_of_mh_late_inlines(0),
                   _oom(false),
@@ -1125,6 +1128,8 @@ void Compile::Init(bool aliasing) {
   Copy::zero_to_bytes(_alias_cache, sizeof(_alias_cache));
   // A null adr_type hits in the cache right away.  Preload the right answer.
   probe_alias_cache(nullptr)->_index = AliasIdxTop;
+  _has_scoped_value_invalidate = false;
+  _has_scoped_value_get_nodes = false;
 }
 
 //---------------------------init_start----------------------------------------
@@ -2272,6 +2277,12 @@ void Compile::Optimize() {
   inline_incrementally(igvn);
 
   print_method(PHASE_INCREMENTAL_INLINE, 2);
+
+  if (failing())  return;
+
+  inline_scoped_value_get_calls(igvn);
+
+  print_method(PHASE_INCREMENTAL_SCOPED_VALUE_INLINE, 2);
 
   if (failing())  return;
 
@@ -3889,6 +3900,12 @@ void Compile::final_graph_reshaping_main_switch(Node* n, Final_Reshape_Counts& f
       Node* cmp = new CmpLNode(andl, n->in(2));
       n->subsume_by(cmp, this);
     }
+    break;
+  }
+  case Op_ScopedValueGetResult:
+  case Op_ScopedValueGetHitsInCache:
+  case Op_ScopedValueGetLoadFromCache: {
+    fatal("ScopedValue nodes should have been expanded by now");
     break;
   }
   default:

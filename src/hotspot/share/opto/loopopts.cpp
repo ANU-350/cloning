@@ -33,6 +33,7 @@
 #include "opto/connode.hpp"
 #include "opto/castnode.hpp"
 #include "opto/divnode.hpp"
+#include "opto/intrinsicnode.hpp"
 #include "opto/loopnode.hpp"
 #include "opto/matcher.hpp"
 #include "opto/mulnode.hpp"
@@ -1663,7 +1664,9 @@ void PhaseIdealLoop::try_sink_out_of_loop(Node* n) {
       !n->is_MergeMem() &&
       !n->is_CMove() &&
       n->Opcode() != Op_Opaque4 &&
-      !n->is_Type()) {
+      !n->is_Type() &&
+      // ScopedValueGetLoadFromCache and companion ScopedValueGetHitsInCacheNode must stay together
+      n->Opcode() != Op_ScopedValueGetLoadFromCache) {
     Node *n_ctrl = get_ctrl(n);
     IdealLoopTree *n_loop = get_loop(n_ctrl);
 
@@ -3763,17 +3766,12 @@ bool PhaseIdealLoop::partial_peel( IdealLoopTree *loop, Node_List &old_new ) {
               break;
             }
             cloned_for_outside_use += new_clones;
-            sink_list.push(n);
-            peel.remove(n->_idx);
-            not_peel.set(n->_idx);
-            peel_list.remove(i);
+            sink_to_not_peel(peel, not_peel, peel_list, sink_list, i);
             incr = false;
-#ifndef PRODUCT
-            if (TracePartialPeeling) {
-              tty->print_cr("sink to not_peeled region: %d newbb: %d",
-                            n->_idx, get_ctrl(n)->_idx);
-            }
-#endif
+          } else if (n->Opcode() == Op_ScopedValueGetHitsInCache) {
+            // ScopedValueGetLoadFromCache and companion ScopedValueGetHitsInCacheNode must stay together
+            move_scoped_value_nodes_to_avoid_peeling_it(peel, not_peel, peel_list, sink_list, i);
+            incr = false;
           }
         } else {
           // Otherwise check for special def-use cases that span
@@ -3985,6 +3983,21 @@ bool PhaseIdealLoop::partial_peel( IdealLoopTree *loop, Node_List &old_new ) {
   C->print_method(PHASE_AFTER_PARTIAL_PEELING, 4, new_head_clone);
 
   return true;
+}
+
+void PhaseIdealLoop::sink_to_not_peel(VectorSet& peel, VectorSet& not_peel, Node_List& peel_list, Node_List& sink_list,
+                                      uint i) {
+  Node* n = peel_list.at(i);
+  sink_list.push(n);
+  peel.remove(n->_idx);
+  not_peel.set(n->_idx);
+  peel_list.remove(i);
+#ifndef PRODUCT
+  if (TracePartialPeeling) {
+    tty->print_cr("sink to not_peeled region: %d newbb: %d",
+                  n->_idx, get_ctrl(n)->_idx);
+  }
+#endif
 }
 
 // Transform:

@@ -39,6 +39,7 @@ import jdk.internal.javac.PreviewFeature;
 import jdk.internal.vm.annotation.ForceInline;
 import jdk.internal.vm.annotation.Hidden;
 import jdk.internal.vm.ScopedValueContainer;
+import jdk.internal.vm.annotation.IntrinsicCandidate;
 import sun.security.action.GetPropertyAction;
 
 /**
@@ -311,7 +312,7 @@ public final class ScopedValue<T> {
      */
     @PreviewFeature(feature = PreviewFeature.Feature.SCOPED_VALUES)
     public static final class Carrier {
-        // Bit masks: a 1 in postion n indicates that this set of bound values
+        // Bit masks: a 1 in position n indicates that this set of bound values
         // hits that slot in the cache.
         final int bitmask;
         final ScopedValue<?> key;
@@ -674,6 +675,7 @@ public final class ScopedValue<T> {
      * @throws NoSuchElementException if the scoped value is not bound
      */
     @ForceInline
+    @IntrinsicCandidate
     @SuppressWarnings("unchecked")
     public T get() {
         Object[] objects;
@@ -694,6 +696,7 @@ public final class ScopedValue<T> {
     }
 
     @SuppressWarnings("unchecked")
+    @IntrinsicCandidate
     private T slowGet() {
         var value = findBinding();
         if (value == Snapshot.NIL) {
@@ -771,6 +774,7 @@ public final class ScopedValue<T> {
         }
     }
 
+    @ForceInline
     private static Object[] scopedValueCache() {
         return Thread.scopedValueCache();
     }
@@ -954,6 +958,7 @@ public final class ScopedValue<T> {
         }
 
         // Null a set of cache entries, indicated by the 1-bits given
+        @IntrinsicCandidate
         static void invalidate(int toClearBits) {
             toClearBits = (toClearBits >>> TABLE_SIZE) | (toClearBits & PRIMARY_MASK);
             Object[] objects;

@@ -446,6 +446,7 @@ public:
 #endif
 
   bool same_condition(const Node* dom, PhaseIterGVN* igvn) const;
+  float canonical_prob() const;
 };
 
 class RangeCheckNode : public IfNode {

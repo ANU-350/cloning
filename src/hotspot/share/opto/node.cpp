@@ -964,14 +964,19 @@ Node* Node::uncast(bool keep_deps) const {
 }
 
 // Find out of current node that matches opcode.
-Node* Node::find_out_with(int opcode) {
+Node* Node::find_out_with(int opcode, bool want_unique) const {
+  Node* res = nullptr;
   for (DUIterator_Fast imax, i = fast_outs(imax); i < imax; i++) {
     Node* use = fast_out(i);
     if (use->Opcode() == opcode) {
-      return use;
+      assert(res == nullptr, "only one match");
+      res = use;
+      if (!want_unique) {
+        break;
+      }
     }
   }
-  return nullptr;
+  return res;
 }
 
 // Return true if the current node has an out that matches opcode.

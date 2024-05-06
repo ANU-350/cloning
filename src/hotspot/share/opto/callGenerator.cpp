@@ -38,6 +38,7 @@
 #include "opto/parse.hpp"
 #include "opto/rootnode.hpp"
 #include "opto/runtime.hpp"
+#include "opto/scoped_value.hpp"
 #include "opto/subnode.hpp"
 #include "runtime/os.inline.hpp"
 #include "runtime/sharedRuntime.hpp"
@@ -708,6 +709,8 @@ void CallGenerator::do_late_inline_helper() {
     // Capture any exceptional control flow
     GraphKit kit(new_jvms);
 
+    process_result(kit);
+
     // Find the result object
     Node* result = C->top();
     int   result_size = method()->return_type()->size();
@@ -814,6 +817,67 @@ class LateInlineVectorReboxingCallGenerator : public LateInlineCallGenerator {
 //   static CallGenerator* for_vector_reboxing_late_inline(ciMethod* m, CallGenerator* inline_cg);
 CallGenerator* CallGenerator::for_vector_reboxing_late_inline(ciMethod* method, CallGenerator* inline_cg) {
   return new LateInlineVectorReboxingCallGenerator(method, inline_cg);
+}
+
+// Inline ScopedValue.get() call, pattern match the resulting subgraph, transform the subgraph to make it more amenable
+// to optimizations.
+class LateInlineScopedValueCallGenerator : public LateInlineCallGenerator {
+ private:
+  bool _process_result;
+  Node* _scoped_value_object;
+
+ public:
+  LateInlineScopedValueCallGenerator(ciMethod* method, CallGenerator* inline_cg, bool process_result) :
+          LateInlineCallGenerator(method, inline_cg),
+          _process_result(process_result),
+          _scoped_value_object(nullptr) {}
+
+  virtual JVMState* generate(JVMState* jvms) {
+    Compile *C = Compile::current();
+
+    C->log_inline_id(this);
+
+    C->add_scoped_value_late_inline(this);
+
+    JVMState* new_jvms = DirectCallGenerator::generate(jvms);
+    return new_jvms;
+  }
+
+  virtual CallGenerator* with_call_node(CallNode* call) {
+    LateInlineScopedValueCallGenerator* cg = new LateInlineScopedValueCallGenerator(method(), _inline_cg, false);
+    cg->set_call_node(call->as_CallStaticJava());
+    return cg;
+  }
+
+  void do_late_inline() {
+    CallNode* call = call_node();
+    _scoped_value_object = call->in(TypeFunc::Parms);
+    CallGenerator::do_late_inline_helper();
+  }
+
+  virtual void set_process_result(bool v) {
+    _process_result = v;
+  }
+
+  // Inlining is finished. Here we first pattern match the resulting subgraph to extract profile data. Then the subgraph
+  // is transformed so probing the scoped value cache is handled by a ScopedValueGetHitsInCache/ScopedValueGetLoadFromCache
+  // pair of nodes. The resulting shape is better suited for optimization. Profiled data is attached to these nodes.
+  // Later, the pair of nodes are expanded back to a subgraph that probes the cache.
+  virtual void process_result(GraphKit& kit) {
+    if (!_process_result) {
+      return;
+    }
+    assert(_scoped_value_object != nullptr, "must have set scoped value to be pattern matched");
+    assert(method()->intrinsic_id() == vmIntrinsics::_ScopedValue_get, "should be run after late inlining of ScopedValue.get()");
+    ScopedValueGetPatternMatcher pattern_matcher(kit, _scoped_value_object);
+    // Now transform the subgraph in a way that makes it amenable to optimizations
+    ScopedValueTransformer transformer(kit, _scoped_value_object, pattern_matcher);
+  }
+};
+
+CallGenerator* CallGenerator::for_scoped_value_get_late_inline(ciMethod* m, CallGenerator* inline_cg,
+                                                               bool process_result) {
+  return new LateInlineScopedValueCallGenerator(m, inline_cg, process_result);
 }
 
 //------------------------PredictedCallGenerator------------------------------

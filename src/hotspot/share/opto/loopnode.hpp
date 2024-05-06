@@ -698,9 +698,10 @@ public:
 
   // Return TRUE or FALSE if the loop should be peeled or not. Peel if we can
   // move some loop-invariant test (usually a null-check) before the loop.
-  bool policy_peeling(PhaseIdealLoop *phase);
+  bool policy_peeling(PhaseIdealLoop* phase);
+  bool policy_peeling_for_scoped_value(PhaseIdealLoop* phase);
 
-  uint estimate_peeling(PhaseIdealLoop *phase);
+  uint estimate_peeling(PhaseIdealLoop* phase);
 
   // Return TRUE or FALSE if the loop should be maximally unrolled. Stash any
   // known trip count in the counted loop node.
@@ -814,6 +815,8 @@ public:
   bool empty_loop_candidate(PhaseIdealLoop* phase) const;
 
   bool empty_loop_with_extra_nodes_candidate(PhaseIdealLoop* phase) const;
+
+  uint estimate_if_peeling_possible(PhaseIdealLoop* phase) const;
 };
 
 // -----------------------------PhaseIdealLoop---------------------------------
@@ -895,6 +898,7 @@ private:
   // clear out dead code after build_loop_late
   Node_List _deadlist;
   Node_List _zero_trip_guard_opaque_nodes;
+  Node_List _scoped_value_get_nodes;
 
   // Support for faster execution of get_late_ctrl()/dom_lca()
   // when a node has many uses and dominator depth is deep.
@@ -1242,8 +1246,9 @@ public:
   IdealLoopTree* ltree_root() const { return _ltree_root; }
 
   // Is 'n' a (nested) member of 'loop'?
-  int is_member( const IdealLoopTree *loop, Node *n ) const {
-    return loop->is_member(get_loop(n)); }
+  bool is_member(const IdealLoopTree *loop, Node *n) const {
+    return loop->is_member(get_loop(n));
+  }
 
   // This is the basic building block of the loop optimizations.  It clones an
   // entire loop body.  It makes an old_new loop body mapping; with this
@@ -1770,8 +1775,44 @@ public:
   void update_addp_chain_base(Node* x, Node* old_base, Node* new_base);
 
   bool can_move_to_inner_loop(Node* n, LoopNode* n_loop, Node* x);
+  void expand_sv_get_hits_in_cache_and_load_from_cache(ScopedValueGetHitsInCacheNode* hits_in_cache);
+  void test_and_load_from_cache(Node* load_of_cache, Node* mem, Node* index, Node* c, float prob, float cnt,
+                                Node* sv, Node*& failure, Node*& hit, Node*& res);
+
+  static bool is_uncommon_or_multi_uncommon_trap_if_pattern(IfProjNode* proj);
+
+  bool optimize_scoped_value_get_nodes();
+
+  bool expand_scoped_value_get_nodes();
+
+  bool loop_predication_for_scoped_value_get(IdealLoopTree* loop, IfProjNode* if_success_proj,
+                                             ParsePredicateSuccessProj* parse_predicate_proj,
+                                             Invariance& invar, Deoptimization::DeoptReason reason,
+                                             IfNode* iff, IfProjNode*& new_predicate_proj);
+
+  void move_scoped_value_nodes_to_avoid_peeling_it(VectorSet& peel, VectorSet& not_peel, Node_List& peel_list,
+                                                   Node_List& sink_list, uint i);
+
+  Node* make_scoped_value_cache_node(Node* raw_mem);
+
+  void find_most_likely_cache_index(const ScopedValueGetHitsInCacheNode* hits_in_cache, Node*& first_index,
+                                    Node*& second_index,
+                                    float& prob_cache_miss_at_first_if, float& first_if_cnt,
+                                    float& prob_cache_miss_at_second_if, float& second_if_cnt) const;
+
+  bool replace_scoped_value_result_by_dominator(ScopedValueGetResultNode* get_result, Node* scoped_value_object, Node* dom_ctrl);
 
   void pin_array_access_nodes_dependent_on(Node* ctrl);
+
+  bool hits_in_cache_replaced_by_dominating_hits_in_cache(Node* n, Node* m);
+
+  bool hits_in_cache_replaced_by_dominating_get_result(Node* n, Node* m);
+
+  bool get_result_replaced_by_dominating_hits_in_cache(Node* n, Node* m);
+
+  bool get_result_replaced_by_dominating_get_result(Node* n, Node* m);
+
+  void sink_to_not_peel(VectorSet& peel, VectorSet& not_peel, Node_List& peel_list, Node_List& sink_list, uint i);
 };
 
 
@@ -1939,6 +1980,56 @@ class DataNodeGraph : public StackObj {
     clone_data_nodes_and_transform_opaque_loop_nodes(transform_strategy, new_ctrl);
     rewire_clones_to_cloned_inputs();
     return _orig_to_new;
+  }
+};
+
+//------------------------------Invariance-----------------------------------
+// Helper class for loop_predication_impl to compute invariance on the fly and
+// clone invariants.
+class Invariance : public StackObj {
+  VectorSet _visited, _invariant;
+  Node_Stack _stack;
+  VectorSet _clone_visited;
+  Node_List _old_new; // map of old to new (clone)
+  IdealLoopTree* _lpt;
+  PhaseIdealLoop* _phase;
+  Node* _data_dependency_on; // The projection into the loop on which data nodes are dependent or null otherwise
+
+  void visit(Node* use, Node* n);
+  void compute_invariance(Node* n);
+  void clone_visit(Node* n);
+  void clone_nodes(Node* n, Node* ctrl);
+
+public:
+  Invariance(Arena* area, IdealLoopTree* lpt);
+
+  // Did we explicitly mark some nodes non-loop-invariant? If so, return the entry node on which some data nodes
+  // are dependent that prevent loop predication. Otherwise, return null.
+  Node* data_dependency_on() {
+    return _data_dependency_on;
+  }
+
+  void map_ctrl(Node* old, Node* n) {
+    assert(old->is_CFG() && n->is_CFG(), "must be");
+    _old_new.map(old->_idx, n); // "clone" of old is n
+    _invariant.set(old->_idx);  // old is invariant
+    _clone_visited.set(old->_idx);
+  }
+
+  // Driver function to compute invariance
+  bool is_invariant(Node* n) {
+    if (!_visited.test_set(n->_idx))
+      compute_invariance(n);
+    return (_invariant.test(n->_idx) != 0);
+  }
+
+  // Driver function to clone invariant
+  Node* clone(Node* n, Node* ctrl) {
+    assert(ctrl->is_CFG(), "must be");
+    assert(_invariant.test(n->_idx), "must be an invariant");
+    if (!_clone_visited.test(n->_idx))
+      clone_nodes(n, ctrl);
+    return _old_new[n->_idx];
   }
 };
 #endif // SHARE_OPTO_LOOPNODE_HPP
