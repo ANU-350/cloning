@@ -28,6 +28,7 @@
 #include "cgroupSubsystem_linux.hpp"
 #include "cgroupV1Subsystem_linux.hpp"
 #include "cgroupV2Subsystem_linux.hpp"
+#include "cgroupUtil_linux.hpp"
 #include "logging/log.hpp"
 #include "memory/allocation.hpp"
 #include "os_linux.hpp"
@@ -41,7 +42,7 @@ static const char* cg_controller_name[] = { "cpu", "cpuset", "cpuacct", "memory"
 CgroupSubsystem* CgroupSubsystemFactory::create() {
   CgroupV1MemoryController* memory = nullptr;
   CgroupV1Controller* cpuset = nullptr;
-  CgroupV1Controller* cpu = nullptr;
+  CgroupV1CpuController* cpu = nullptr;
   CgroupV1Controller* cpuacct = nullptr;
   CgroupV1Controller* pids = nullptr;
   CgroupInfo cg_infos[CG_INFO_LENGTH];
@@ -63,10 +64,12 @@ CgroupSubsystem* CgroupSubsystemFactory::create() {
     // Construct the subsystem, free resources and return
     // Note: any index in cg_infos will do as the path is the same for
     //       all controllers.
-    CgroupController* unified = new CgroupV2Controller(cg_infos[MEMORY_IDX]._mount_path, cg_infos[MEMORY_IDX]._cgroup_path);
+    CgroupV2MemoryController* memory = new CgroupV2MemoryController(cg_infos[MEMORY_IDX]._root_mount_path, cg_infos[MEMORY_IDX]._mount_path);
+    CgroupV2CpuController* cpu = new CgroupV2CpuController(cg_infos[CPU_IDX]._root_mount_path, cg_infos[CPU_IDX]._mount_path);
+    memory->set_subsystem_path(cg_infos[MEMORY_IDX]._cgroup_path);
     log_debug(os, container)("Detected cgroups v2 unified hierarchy");
     cleanup(cg_infos);
-    return new CgroupV2Subsystem(unified);
+    return new CgroupV2Subsystem(memory, cpu);
   }
 
   /*
@@ -106,7 +109,7 @@ CgroupSubsystem* CgroupSubsystemFactory::create() {
         cpuset = new CgroupV1Controller(info._root_mount_path, info._mount_path);
         cpuset->set_subsystem_path(info._cgroup_path);
       } else if (strcmp(info._name, "cpu") == 0) {
-        cpu = new CgroupV1Controller(info._root_mount_path, info._mount_path);
+        cpu = new CgroupV1CpuController(info._root_mount_path, info._mount_path);
         cpu->set_subsystem_path(info._cgroup_path);
       } else if (strcmp(info._name, "cpuacct") == 0) {
         cpuacct = new CgroupV1Controller(info._root_mount_path, info._mount_path);
@@ -475,13 +478,13 @@ void CgroupSubsystemFactory::cleanup(CgroupInfo* cg_infos) {
  */
 int CgroupSubsystem::active_processor_count() {
   int quota_count = 0;
-  int cpu_count, limit_count;
+  int cpu_count;
   int result;
 
   // We use a cache with a timeout to avoid performing expensive
   // computations in the event this function is called frequently.
   // [See 8227006].
-  CachingCgroupController* contrl = cpu_controller();
+  CachingCgroupController<CgroupCpuController*>* contrl = cpu_controller();
   CachedMetric* cpu_limit = contrl->metrics_cache();
   if (!cpu_limit->should_check_metric()) {
     int val = (int)cpu_limit->value();
@@ -489,23 +492,8 @@ int CgroupSubsystem::active_processor_count() {
     return val;
   }
 
-  cpu_count = limit_count = os::Linux::active_processor_count();
-  int quota  = cpu_quota();
-  int period = cpu_period();
-
-  if (quota > -1 && period > 0) {
-    quota_count = ceilf((float)quota / (float)period);
-    log_trace(os, container)("CPU Quota count based on quota/period: %d", quota_count);
-  }
-
-  // Use quotas
-  if (quota_count != 0) {
-    limit_count = quota_count;
-  }
-
-  result = MIN2(cpu_count, limit_count);
-  log_trace(os, container)("OSContainer::active_processor_count: %d", result);
-
+  cpu_count = os::Linux::active_processor_count();
+  result = CgroupUtil::processor_count(contrl->controller(), cpu_count);
   // Update cached metric to avoid re-reading container settings too often
   cpu_limit->set_value(result, OSCONTAINER_CACHE_TIMEOUT);
 
@@ -522,55 +510,303 @@ int CgroupSubsystem::active_processor_count() {
  *    OSCONTAINER_ERROR for not supported
  */
 jlong CgroupSubsystem::memory_limit_in_bytes() {
-  CachingCgroupController* contrl = memory_controller();
+  CachingCgroupController<CgroupMemoryController*>* contrl = memory_controller();
   CachedMetric* memory_limit = contrl->metrics_cache();
   if (!memory_limit->should_check_metric()) {
     return memory_limit->value();
   }
   jlong phys_mem = os::Linux::physical_memory();
   log_trace(os, container)("total physical memory: " JLONG_FORMAT, phys_mem);
-  jlong mem_limit = read_memory_limit_in_bytes();
-
-  if (mem_limit <= 0 || mem_limit >= phys_mem) {
-    jlong read_mem_limit = mem_limit;
-    const char *reason;
-    if (mem_limit >= phys_mem) {
-      // Exceeding physical memory is treated as unlimited. Cg v1's implementation
-      // of read_memory_limit_in_bytes() caps this at phys_mem since Cg v1 has no
-      // value to represent 'max'. Cg v2 may return a value >= phys_mem if e.g. the
-      // container engine was started with a memory flag exceeding it.
-      reason = "ignored";
-      mem_limit = -1;
-    } else if (OSCONTAINER_ERROR == mem_limit) {
-      reason = "failed";
-    } else {
-      assert(mem_limit == -1, "Expected unlimited");
-      reason = "unlimited";
-    }
-    log_debug(os, container)("container memory limit %s: " JLONG_FORMAT ", using host value " JLONG_FORMAT,
-                             reason, read_mem_limit, phys_mem);
-  }
-
+  jlong mem_limit = contrl->controller()->read_memory_limit_in_bytes(phys_mem);
   // Update cached metric to avoid re-reading container settings too often
   memory_limit->set_value(mem_limit, OSCONTAINER_CACHE_TIMEOUT);
   return mem_limit;
 }
 
-jlong CgroupSubsystem::limit_from_str(char* limit_str) {
-  if (limit_str == nullptr) {
-    return OSCONTAINER_ERROR;
+bool CgroupController::read_string(const char* filename, char** result) {
+  char res[1024];
+  bool ok = read_from_file<char*>(filename, "%1023s", res);
+  if (!ok) {
+    return false;
   }
-  // Unlimited memory in cgroups is the literal string 'max' for
-  // some controllers, for example the pids controller.
-  if (strcmp("max", limit_str) == 0) {
-    os::free(limit_str);
-    return (jlong)-1;
+  *result = os::strdup(res);
+  return true;
+}
+
+bool CgroupController::read_number(const char* filename, julong* result) {
+  return read_from_file<julong*>(filename, JULONG_FORMAT, result);
+}
+
+bool CgroupController::read_numerical_key_value(const char* filename, const char* key, julong* result) {
+  if (filename == nullptr) {
+    log_debug(os, container)("read_numerical_key_value: filename is null");
+    return false;
   }
-  julong limit;
-  if (sscanf(limit_str, JULONG_FORMAT, &limit) != 1) {
-    os::free(limit_str);
-    return OSCONTAINER_ERROR;
+  const char* s_path = subsystem_path();
+  if (s_path == nullptr) {
+    log_debug(os, container)("read_numerical_key_value: subsystem path is null");
+    return false;
   }
-  os::free(limit_str);
-  return (jlong)limit;
+  if (key == nullptr || result == nullptr) {
+    log_debug(os, container)("read_numerical_key_value: key or return pointer is null");
+    return false;
+  }
+
+  stringStream file_path;
+  file_path.print_raw(s_path);
+  file_path.print_raw(filename);
+
+  if (file_path.size() > MAXPATHLEN) {
+    log_debug(os, container)("File path too long %s, %s", file_path.base(), filename);
+    return false;
+  }
+  const char* absolute_path = file_path.freeze();
+  log_trace(os, container)("Path to %s is %s", filename, absolute_path);
+  FILE* fp = os::fopen(absolute_path, "r");
+  if (fp == nullptr) {
+    log_debug(os, container)("Open of file %s failed, %s", absolute_path, os::strerror(errno));
+    return false;
+  }
+
+  const int buf_len = MAXPATHLEN+1;
+  char buf[buf_len];
+  char* line = fgets(buf, buf_len, fp);
+  if (line == nullptr) {
+    log_debug(os, container)("Empty file %s", absolute_path);
+    fclose(fp);
+    return false;
+  }
+
+  bool found_match = false;
+  // File consists of multiple lines in a "key value"
+  // fashion, we have to find the key.
+  const int key_len = (int)strlen(key);
+  for (; line != nullptr; line = fgets(buf, buf_len, fp)) {
+    char* key_substr = strstr(line, key);
+    char after_key = line[key_len];
+    if (key_substr == line
+          && isspace(after_key) != 0
+          && after_key != '\n') {
+      // Skip key, skip space
+      const char* value_substr = line + key_len + 1;
+      int matched = sscanf(value_substr, JULONG_FORMAT, result);
+      found_match = matched == 1;
+      if (found_match) {
+        break;
+      }
+    }
+  }
+  fclose(fp);
+  if (found_match) {
+    return true;
+  }
+  log_debug(os, container)("Type %s (key == %s) not found in file %s", JULONG_FORMAT,
+                           key, absolute_path);
+  return false;
+}
+
+bool CgroupController::read_numerical_tuple_value(const char* filename, TupleValue tup, jlong* result) {
+  char token[1024];
+  bool is_ok = read_from_file<char*>(filename, tuple_format(tup), token);
+  if (!is_ok) {
+    return false;
+  }
+  char* t = os::strdup(token);
+  jlong val = CgroupUtil::limit_from_str(t);
+  if (val == OSCONTAINER_ERROR) {
+    return false;
+  }
+  *result = val;
+  return true;
+}
+
+PRAGMA_DIAG_PUSH
+PRAGMA_FORMAT_NONLITERAL_IGNORED // Only string/number literal formats used. See read_*() functions.
+template <typename T>
+bool CgroupController::read_from_file(const char* filename, const char* scan_fmt, T result) {
+  assert(scan_fmt != nullptr, "invariant");
+  if (filename == nullptr) {
+    log_debug(os, container)("read_from_file: filename is null");
+    return false;
+  }
+  if (result == nullptr) {
+    log_debug(os, container)("read_from_file: return pointer is null");
+    return false;
+  }
+  const char* s_path = subsystem_path();
+  if (s_path == nullptr) {
+    log_debug(os, container)("read_from_file: subsystem path is null");
+    return false;
+  }
+
+  stringStream file_path;
+  file_path.print_raw(s_path);
+  file_path.print_raw(filename);
+
+  if (file_path.size() > MAXPATHLEN) {
+    log_debug(os, container)("File path too long %s, %s", file_path.base(), filename);
+    return false;
+  }
+  const char* absolute_path = file_path.freeze();
+  log_trace(os, container)("Path to %s is %s", filename, absolute_path);
+
+  FILE* fp = os::fopen(absolute_path, "r");
+  if (fp == nullptr) {
+    log_debug(os, container)("Open of file %s failed, %s", absolute_path, os::strerror(errno));
+    return false;
+  }
+
+  const int buf_len = MAXPATHLEN+1;
+  char buf[buf_len];
+  char* line = fgets(buf, buf_len, fp);
+  fclose(fp);
+  if (line == nullptr) {
+    log_debug(os, container)("Empty file %s", absolute_path);
+    return false;
+  }
+
+  int matched = sscanf(line, scan_fmt, result);
+  if (matched == 1) {
+    return true;
+  } else {
+    log_debug(os, container)("Type %s not found in file %s", scan_fmt, absolute_path);
+  }
+  return false;
+}
+PRAGMA_DIAG_POP
+
+// CgroupSubsystem implementations
+
+jlong CgroupSubsystem::memory_and_swap_limit_in_bytes() {
+  julong phys_mem = os::Linux::physical_memory();
+  julong host_swap = os::Linux::host_swap();
+  return memory_controller()->controller()->memory_and_swap_limit_in_bytes(phys_mem, host_swap);
+}
+
+jlong CgroupSubsystem::memory_and_swap_usage_in_bytes() {
+  julong phys_mem = os::Linux::physical_memory();
+  julong host_swap = os::Linux::host_swap();
+  return memory_controller()->controller()->memory_and_swap_usage_in_bytes(phys_mem, host_swap);
+}
+
+jlong CgroupSubsystem::memory_soft_limit_in_bytes() {
+  julong phys_mem = os::Linux::physical_memory();
+  return memory_controller()->controller()->memory_soft_limit_in_bytes(phys_mem);
+}
+
+jlong CgroupSubsystem::memory_usage_in_bytes() {
+  return memory_controller()->controller()->memory_usage_in_bytes();
+}
+
+jlong CgroupSubsystem::memory_max_usage_in_bytes() {
+  return memory_controller()->controller()->memory_max_usage_in_bytes();
+}
+
+jlong CgroupSubsystem::rss_usage_in_bytes() {
+  return memory_controller()->controller()->rss_usage_in_bytes();
+}
+
+jlong CgroupSubsystem::cache_usage_in_bytes() {
+  return memory_controller()->controller()->cache_usage_in_bytes();
+}
+
+int CgroupSubsystem::cpu_quota() {
+  return cpu_controller()->controller()->cpu_quota();
+}
+
+int CgroupSubsystem::cpu_period() {
+  return cpu_controller()->controller()->cpu_period();
+}
+
+int CgroupSubsystem::cpu_shares() {
+  return cpu_controller()->controller()->cpu_shares();
+}
+
+/*
+ * Set directory to subsystem specific files based
+ * on the contents of the mountinfo and cgroup files.
+ */
+void CgroupController::set_subsystem_path(const char *cgroup_path) {
+  os::free(_cgroup_path);
+  _cgroup_path = os::strdup(cgroup_path);
+  trim_path(0);
+}
+
+void CgroupController::set_path(const char *cgroup_path) {
+  __attribute__((unused)) bool _cgroup_path; // Do not use the member variable.
+  stringStream ss;
+  if (_root == nullptr || cgroup_path == nullptr) {
+    return;
+  }
+  if (strcmp(_root, "/") == 0) {
+    ss.print_raw(_mount_point);
+    if (strcmp(cgroup_path, "/") != 0) {
+      ss.print_raw(cgroup_path);
+    }
+    os::free(_path);
+    _path = os::strdup(ss.base());
+    return;
+  }
+  if (strcmp(_root, cgroup_path) == 0) {
+    os::free(_path);
+    _path = os::strdup(_mount_point);
+    return;
+  }
+  if (strlen(cgroup_path) == strlen(_root)) {
+    return;
+  }
+  if (strncmp(cgroup_path, _root, strlen(_root)) != 0 || cgroup_path[strlen(_root)] != '/') {
+    return;
+  }
+  ss.print_raw(_mount_point);
+  const char* cg_path_sub = cgroup_path + strlen(_root);
+  ss.print_raw(cg_path_sub);
+  os::free(_path);
+  _path = os::strdup(ss.base());
+}
+
+/* trim_path
+ *
+ * Remove specific dir_count number of trailing _cgroup_path directories
+ *
+ * return:
+ *    whether dir_count was < number of _cgroup_path directories
+ *    false is returned if the result would be cgroup root directory
+ */
+bool CgroupController::trim_path(size_t dir_count) {
+  char *cgroup_path = os::strdup(_cgroup_path);
+  assert(cgroup_path[0] == '/', "_cgroup_path should start with a slash ('/')");
+  while (dir_count--) {
+    char *s = strrchr(cgroup_path, '/');
+    assert(s, "function should have already returned");
+    *s = 0;
+    if (s == cgroup_path) {
+      os::free(cgroup_path);
+      return false;
+    }
+  }
+  set_path(cgroup_path);
+  os::free(cgroup_path);
+  return true;
+}
+
+void CgroupSubsystem::initialize_hierarchy() {
+  CgroupMemoryController *memory = memory_controller()->controller();
+
+  jlong phys_mem = os::Linux::physical_memory();
+
+  // Here it ignores any possible lower limit in parent directories.
+  // Linux kernel will correctly consider both that but this code does not.
+  for (size_t dir_count = 0; memory->trim_path(dir_count); ++dir_count) {
+    jlong memory_limit = memory->read_memory_limit_in_bytes(phys_mem);
+    jlong memory_swap_limit = memory_and_swap_limit_in_bytes();
+    if ((memory_limit != -1 && memory_limit != OSCONTAINER_ERROR)
+        || (memory_swap_limit != -1 && memory_swap_limit != OSCONTAINER_ERROR)) {
+      log_trace(os, container)("Final Memory Limit is: " JLONG_FORMAT, memory_limit);
+      log_trace(os, container)("Final Memory and Swap Limit is: " JLONG_FORMAT, memory_swap_limit);
+      return;
+    }
+  }
+
+  memory->trim_path(0);
 }

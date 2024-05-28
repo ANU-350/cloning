@@ -31,69 +31,62 @@
 
 // Cgroups version 1 specific implementation
 
-class CgroupV1Controller: public CgroupController {
-  private:
-    /* mountinfo contents */
-    char *_root;
-    char *_mount_point;
-
-    /* Constructed subsystem directory */
-    char *_path;
-
+class CgroupV1Controller: virtual public CgroupController {
   public:
-    CgroupV1Controller(char *root, char *mountpoint) {
-      _root = os::strdup(root);
-      _mount_point = os::strdup(mountpoint);
-      _path = nullptr;
-    }
-
-    virtual void set_subsystem_path(char *cgroup_path);
-    char *subsystem_path() { return _path; }
+    CgroupV1Controller(const char *root, const char *mountpoint) : CgroupController(root, mountpoint) {}
 };
 
-class CgroupV1MemoryController: public CgroupV1Controller {
+class CgroupV1MemoryController: public CgroupV1Controller, public CgroupMemoryController {
 
   public:
-    bool is_hierarchical() { return _uses_mem_hierarchy; }
-    void set_subsystem_path(char *cgroup_path);
+    void set_subsystem_path(const char *cgroup_path) override;
+    jlong read_memory_limit_in_bytes(julong upper_bound);
+    jlong memory_usage_in_bytes();
+    jlong memory_and_swap_limit_in_bytes(julong host_mem, julong host_swap);
+    jlong memory_and_swap_usage_in_bytes(julong host_mem, julong host_swap);
+    jlong memory_soft_limit_in_bytes(julong upper_bound);
+    jlong memory_max_usage_in_bytes();
+    jlong rss_usage_in_bytes();
+    jlong cache_usage_in_bytes();
+    jlong kernel_memory_usage_in_bytes();
+    jlong kernel_memory_limit_in_bytes(julong host_mem);
+    jlong kernel_memory_max_usage_in_bytes();
+    const char *subsystem_path() override { return CgroupV1Controller::subsystem_path(); }
   private:
     /* Some container runtimes set limits via cgroup
-     * hierarchy. If set to true consider also memory.stat
+     * hierarchy. Consider also memory.stat
      * file if everything else seems unlimited */
-    bool _uses_mem_hierarchy;
-    jlong uses_mem_hierarchy();
-    void set_hierarchical(bool value) { _uses_mem_hierarchy = value; }
+    jlong check_mem_hierarchy();
+    jlong read_mem_swappiness();
+    jlong read_mem_swap(julong host_total_memsw);
 
   public:
-    CgroupV1MemoryController(char *root, char *mountpoint) : CgroupV1Controller(root, mountpoint) {
-      _uses_mem_hierarchy = false;
-    }
+    CgroupV1MemoryController(char *root, char *mountpoint) : CgroupController(root, mountpoint), CgroupV1Controller(root, mountpoint) {}
 
+};
+
+class CgroupV1CpuController: public CgroupV1Controller, public CgroupCpuController {
+
+  public:
+    int cpu_quota();
+    int cpu_period();
+    int cpu_shares();
+
+  public:
+    CgroupV1CpuController(char *root, char *mountpoint) : CgroupController(root, mountpoint), CgroupV1Controller(root, mountpoint) {
+    }
+    const char *subsystem_path() override { return CgroupV1Controller::subsystem_path(); }
 };
 
 class CgroupV1Subsystem: public CgroupSubsystem {
 
   public:
-    jlong read_memory_limit_in_bytes();
-    jlong memory_and_swap_limit_in_bytes();
-    jlong memory_and_swap_usage_in_bytes();
-    jlong memory_soft_limit_in_bytes();
-    jlong memory_usage_in_bytes();
-    jlong memory_max_usage_in_bytes();
-    jlong rss_usage_in_bytes();
-    jlong cache_usage_in_bytes();
-
     jlong kernel_memory_usage_in_bytes();
     jlong kernel_memory_limit_in_bytes();
     jlong kernel_memory_max_usage_in_bytes();
 
     char * cpu_cpuset_cpus();
     char * cpu_cpuset_memory_nodes();
-
-    int cpu_quota();
-    int cpu_period();
-
-    int cpu_shares();
 
     jlong pids_max();
     jlong pids_current();
@@ -103,33 +96,31 @@ class CgroupV1Subsystem: public CgroupSubsystem {
     const char * container_type() {
       return "cgroupv1";
     }
-    CachingCgroupController * memory_controller() { return _memory; }
-    CachingCgroupController * cpu_controller() { return _cpu; }
+    CachingCgroupController<CgroupMemoryController*>* memory_controller() { return _memory; }
+    CachingCgroupController<CgroupCpuController*>* cpu_controller() { return _cpu; }
 
   private:
     /* controllers */
-    CachingCgroupController* _memory = nullptr;
+    CachingCgroupController<CgroupMemoryController*>* _memory = nullptr;
     CgroupV1Controller* _cpuset = nullptr;
-    CachingCgroupController* _cpu = nullptr;
+    CachingCgroupController<CgroupCpuController*>* _cpu = nullptr;
     CgroupV1Controller* _cpuacct = nullptr;
     CgroupV1Controller* _pids = nullptr;
 
     char * pids_max_val();
 
-    jlong read_mem_swappiness();
-    jlong read_mem_swap();
-
   public:
     CgroupV1Subsystem(CgroupV1Controller* cpuset,
-                      CgroupV1Controller* cpu,
+                      CgroupV1CpuController* cpu,
                       CgroupV1Controller* cpuacct,
                       CgroupV1Controller* pids,
                       CgroupV1MemoryController* memory) {
       _cpuset = cpuset;
-      _cpu = new CachingCgroupController(cpu);
+      _cpu = new CachingCgroupController<CgroupCpuController*>(cpu);
       _cpuacct = cpuacct;
       _pids = pids;
-      _memory = new CachingCgroupController(memory);
+      _memory = new CachingCgroupController<CgroupMemoryController*>(memory);
+      initialize_hierarchy();
     }
 };
 

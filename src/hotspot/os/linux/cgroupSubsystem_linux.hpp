@@ -69,148 +69,69 @@
 #define MEMORY_IDX     3
 #define PIDS_IDX       4
 
-typedef char * cptr;
+#define CONTAINER_READ_NUMBER_CHECKED(controller, filename, log_string, retval)       \
+{                                                                                     \
+  bool is_ok;                                                                         \
+  is_ok = controller->read_number(filename, &retval);                                 \
+  if (!is_ok) {                                                                       \
+    log_trace(os, container)(log_string " failed: %d", OSCONTAINER_ERROR);            \
+    return OSCONTAINER_ERROR;                                                         \
+  }                                                                                   \
+  log_trace(os, container)(log_string " is: " JULONG_FORMAT, retval);                 \
+}
+
+#define CONTAINER_READ_STRING_CHECKED(controller, filename, log_string, retval)       \
+{                                                                                     \
+  bool is_ok;                                                                         \
+  is_ok = controller->read_string(filename, &retval);                                 \
+  if (!is_ok) {                                                                       \
+    log_trace(os, container)(log_string " failed: %d", OSCONTAINER_ERROR);            \
+    return nullptr;                                                                   \
+  }                                                                                   \
+  log_trace(os, container)(log_string " is: %s", retval);                             \
+}
+
+
+enum TupleValue { FIRST, SECOND };
 
 class CgroupController: public CHeapObj<mtInternal> {
+  protected:
+    void set_path(const char *cgroup_path);
+
+    /* mountinfo contents */
+    char *_root;
+    char *_mount_point;
+    char *_cgroup_path = nullptr;
+
+    /* Constructed subsystem directory */
+    char *_path = nullptr;
+
   public:
-    virtual char *subsystem_path() = 0;
-};
-
-PRAGMA_DIAG_PUSH
-PRAGMA_FORMAT_NONLITERAL_IGNORED
-// Parses a subsystem's file, looking for a matching line.
-// If key is null, then the first line will be matched with scan_fmt.
-// If key isn't null, then each line will be matched, looking for something that matches "$key $scan_fmt".
-// The matching value will be assigned to returnval.
-// scan_fmt uses scanf() syntax.
-// Return value: 0 on match, OSCONTAINER_ERROR on error.
-template <typename T> int subsystem_file_line_contents(CgroupController* c,
-                                              const char *filename,
-                                              const char *key,
-                                              const char *scan_fmt,
-                                              T returnval) {
-  if (c == nullptr) {
-    log_debug(os, container)("subsystem_file_line_contents: CgroupController* is null");
-    return OSCONTAINER_ERROR;
-  }
-  if (c->subsystem_path() == nullptr) {
-    log_debug(os, container)("subsystem_file_line_contents: subsystem path is null");
-    return OSCONTAINER_ERROR;
-  }
-
-  stringStream file_path;
-  file_path.print_raw(c->subsystem_path());
-  file_path.print_raw(filename);
-
-  if (file_path.size() > (MAXPATHLEN-1)) {
-    log_debug(os, container)("File path too long %s, %s", file_path.base(), filename);
-    return OSCONTAINER_ERROR;
-  }
-  const char* absolute_path = file_path.freeze();
-  log_trace(os, container)("Path to %s is %s", filename, absolute_path);
-
-  FILE* fp = os::fopen(absolute_path, "r");
-  if (fp == nullptr) {
-    log_debug(os, container)("Open of file %s failed, %s", absolute_path, os::strerror(errno));
-    return OSCONTAINER_ERROR;
-  }
-
-  const int buf_len = MAXPATHLEN+1;
-  char buf[buf_len];
-  char* line = fgets(buf, buf_len, fp);
-  if (line == nullptr) {
-    log_debug(os, container)("Empty file %s", absolute_path);
-    fclose(fp);
-    return OSCONTAINER_ERROR;
-  }
-
-  bool found_match = false;
-  if (key == nullptr) {
-    // File consists of a single line according to caller, with only a value
-    int matched = sscanf(line, scan_fmt, returnval);
-    found_match = matched == 1;
-  } else {
-    // File consists of multiple lines in a "key value"
-    // fashion, we have to find the key.
-    const int key_len = (int)strlen(key);
-    for (; line != nullptr; line = fgets(buf, buf_len, fp)) {
-      char* key_substr = strstr(line, key);
-      char after_key = line[key_len];
-      if (key_substr == line
-          && isspace(after_key) != 0
-          && after_key != '\n') {
-        // Skip key, skip space
-        const char* value_substr = line + key_len + 1;
-        int matched = sscanf(value_substr, scan_fmt, returnval);
-        found_match = matched == 1;
-        if (found_match) {
-          break;
-        }
-      }
+    virtual const char *subsystem_path() { return _path; }
+    bool read_number(const char* filename, julong* result);
+    bool read_string(const char* filename, char** result);
+    bool read_numerical_tuple_value(const char* filename, TupleValue val, jlong* result);
+    bool read_numerical_key_value(const char* filename, const char* key, julong* result);
+    bool trim_path(size_t dir_count);
+    virtual void set_subsystem_path(const char *cgroup_path);
+    CgroupController(const char *root, const char *mountpoint) : _root(os::strdup(root)), _mount_point(os::strdup(mountpoint)) {}
+    ~CgroupController() {
+      os::free(_root);
+      os::free(_mount_point);
+      os::free(_cgroup_path);
+      os::free(_path);
     }
-  }
-  fclose(fp);
-  if (found_match) {
-    return 0;
-  }
-  log_debug(os, container)("Type %s (key == %s) not found in file %s", scan_fmt,
-                           (key == nullptr ? "null" : key), absolute_path);
-  return OSCONTAINER_ERROR;
-}
-PRAGMA_DIAG_POP
-
-// log_fmt can be different than scan_fmt. For example
-// cpu_period() for cgv2 uses log_fmt='%d' and scan_fmt='%*s %d'
-#define GET_CONTAINER_INFO(return_type, subsystem, filename,              \
-                           logstring, log_fmt, scan_fmt, variable)        \
-  return_type variable;                                                   \
-{                                                                         \
-  int err;                                                                \
-  err = subsystem_file_line_contents(subsystem,                           \
-                                     filename,                            \
-                                     nullptr,                             \
-                                     scan_fmt,                            \
-                                     &variable);                          \
-  if (err != 0) {                                                         \
-    log_trace(os, container)(logstring "%d", OSCONTAINER_ERROR);          \
-    return (return_type) OSCONTAINER_ERROR;                               \
-  }                                                                       \
-                                                                          \
-  log_trace(os, container)(logstring log_fmt, variable);                  \
-}
-
-#define GET_CONTAINER_INFO_CPTR(return_type, subsystem, filename,         \
-                               logstring, scan_fmt, variable, bufsize)    \
-  char variable[bufsize];                                                 \
-{                                                                         \
-  int err;                                                                \
-  err = subsystem_file_line_contents(subsystem,                           \
-                                     filename,                            \
-                                     nullptr,                             \
-                                     scan_fmt,                            \
-                                     variable);                           \
-  if (err != 0)                                                           \
-    return (return_type) nullptr;                                         \
-                                                                          \
-  log_trace(os, container)(logstring, variable);                          \
-}
-
-#define GET_CONTAINER_INFO_LINE(return_type, controller, filename,        \
-                           matchline, logstring, scan_fmt, variable)      \
-  return_type variable;                                                   \
-{                                                                         \
-  int err;                                                                \
-  err = subsystem_file_line_contents(controller,                          \
-                                filename,                                 \
-                                matchline,                                \
-                                scan_fmt,                                 \
-                                &variable);                               \
-  if (err != 0)                                                           \
-    return (return_type) OSCONTAINER_ERROR;                               \
-                                                                          \
-  log_trace(os, container)(logstring, variable);                          \
-}
-
+  private:
+    inline static const char* tuple_format(TupleValue val) {
+      switch(val) {
+        case FIRST:  return "%1023s %*s";
+        case SECOND: return "%*s %1023s";
+      }
+      return nullptr;
+    }
+    template <typename T>
+       bool read_from_file(const char* filename, const char* scan_fmt, T result);
+};
 
 class CachedMetric : public CHeapObj<mtInternal>{
   private:
@@ -236,47 +157,70 @@ class CachedMetric : public CHeapObj<mtInternal>{
     }
 };
 
+template <class T>
 class CachingCgroupController : public CHeapObj<mtInternal> {
   private:
-    CgroupController* _controller;
+    T _controller;
     CachedMetric* _metrics_cache;
 
   public:
-    CachingCgroupController(CgroupController* cont) {
+    CachingCgroupController(T cont) {
       _controller = cont;
       _metrics_cache = new CachedMetric();
     }
 
     CachedMetric* metrics_cache() { return _metrics_cache; }
-    CgroupController* controller() { return _controller; }
+    T controller() { return _controller; }
 };
 
-class CgroupSubsystem: public CHeapObj<mtInternal> {
+class CgroupCpuController: virtual public CgroupController {
   public:
-    jlong memory_limit_in_bytes();
-    int active_processor_count();
-    jlong limit_from_str(char* limit_str);
-
     virtual int cpu_quota() = 0;
     virtual int cpu_period() = 0;
     virtual int cpu_shares() = 0;
-    virtual jlong pids_max() = 0;
-    virtual jlong pids_current() = 0;
+    virtual const char *subsystem_path() = 0;
+};
+
+class CgroupMemoryController: virtual public CgroupController {
+  public:
+    virtual jlong read_memory_limit_in_bytes(julong upper_bound) = 0;
     virtual jlong memory_usage_in_bytes() = 0;
-    virtual jlong memory_and_swap_limit_in_bytes() = 0;
-    virtual jlong memory_and_swap_usage_in_bytes() = 0;
-    virtual jlong memory_soft_limit_in_bytes() = 0;
+    virtual jlong memory_and_swap_limit_in_bytes(julong host_mem, julong host_swap) = 0;
+    virtual jlong memory_and_swap_usage_in_bytes(julong host_mem, julong host_swap) = 0;
+    virtual jlong memory_soft_limit_in_bytes(julong upper_bound) = 0;
     virtual jlong memory_max_usage_in_bytes() = 0;
     virtual jlong rss_usage_in_bytes() = 0;
     virtual jlong cache_usage_in_bytes() = 0;
+    virtual const char *subsystem_path() = 0;
+};
 
+
+class CgroupSubsystem: public CHeapObj<mtInternal> {
+  protected:
+    void initialize_hierarchy();
+  public:
+    jlong memory_limit_in_bytes();
+    int active_processor_count();
+
+    virtual jlong pids_max() = 0;
+    virtual jlong pids_current() = 0;
+
+    int cpu_quota();
+    int cpu_period();
+    int cpu_shares();
     virtual char * cpu_cpuset_cpus() = 0;
     virtual char * cpu_cpuset_memory_nodes() = 0;
-    virtual jlong read_memory_limit_in_bytes() = 0;
     virtual const char * container_type() = 0;
-    virtual CachingCgroupController* memory_controller() = 0;
-    virtual CachingCgroupController* cpu_controller() = 0;
+    virtual CachingCgroupController<CgroupMemoryController*>* memory_controller() = 0;
+    virtual CachingCgroupController<CgroupCpuController*>* cpu_controller() = 0;
 
+    jlong memory_usage_in_bytes();
+    jlong memory_and_swap_limit_in_bytes();
+    jlong memory_and_swap_usage_in_bytes();
+    jlong memory_soft_limit_in_bytes();
+    jlong memory_max_usage_in_bytes();
+    jlong rss_usage_in_bytes();
+    jlong cache_usage_in_bytes();
     virtual void print_version_specific_info(outputStream* st) = 0;
 };
 
