@@ -44,17 +44,8 @@ class NativeCallStackStorage : public CHeapObjBase {
 public:
   using StackIndex = int32_t;
 
-  constexpr static const StackIndex invalid = std::numeric_limits<StackIndex>::max() - 1;
-
-  static bool equals(const StackIndex a, const StackIndex b) {
-    return a == b;
-  }
-
-  static bool is_invalid(StackIndex a) {
-    return a == invalid;
-  }
-
 private:
+
   struct TableEntry;
   using TableEntryStorage = ArrayWithFreeList<TableEntry, mtNMT>;
   using TableEntryIndex = typename TableEntryStorage::I;
@@ -73,16 +64,27 @@ private:
   static const constexpr int default_table_size = 4099;
   const int _table_size;
   TableEntryIndex* _table;
-  GrowableArrayCHeap<NativeCallStack, mtNMT> _stacks;
-  const bool _is_detailed_mode;
 
+  ArrayWithFreeList<NativeCallStack, mtNMT> _stacks;
+  constexpr static ArrayWithFreeList<NativeCallStack, mtNMT>::I _invalid_stackindex
+      = ArrayWithFreeList<NativeCallStack, mtNMT>::nil;
+
+  const bool _is_detailed_mode;
   const NativeCallStack _fake_stack;
 public:
+
+  static bool equals(const StackIndex a, const StackIndex b) {
+    return a == b;
+  }
+
+  static bool is_invalid(StackIndex a) {
+    return a == _invalid_stackindex;
+  }
 
   StackIndex push(const NativeCallStack& stack) {
     // Not in detailed mode, so not tracking stacks.
     if (!_is_detailed_mode) {
-      return invalid;
+      return _invalid_stackindex;
     }
     return put(stack);
   }
