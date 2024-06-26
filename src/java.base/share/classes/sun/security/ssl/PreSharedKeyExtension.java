@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2022, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -704,6 +704,8 @@ final class PreSharedKeyExtension {
             if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
                 SSLLogger.fine(
                     "Found resumable session. Preparing PSK message.");
+                SSLLogger.fine(
+                    "MultiNST PSK (Client): " + Utilities.toHexString(Arrays.copyOf(chc.pskIdentity, 16)));
             }
 
             List<PskIdentity> identities = new ArrayList<>();

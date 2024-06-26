@@ -52,10 +52,13 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 
 abstract public class TLSBase {
-    static String pathToStores = "../etc";
+    static String pathToStores = "javax/net/ssl/etc";
     static String keyStoreFile = "keystore";
     static String trustStoreFile = "truststore";
     static String passwd = "passphrase";
+
+    final static String TESTROOT =
+        System.getProperty("test.root", "../../../..");
 
     SSLContext sslContext;
     // Server's port
@@ -64,12 +67,10 @@ abstract public class TLSBase {
     String name;
 
     TLSBase() {
-        String keyFilename =
-            System.getProperty("test.src", "./") + "/" + pathToStores +
-                "/" + keyStoreFile;
-        String trustFilename =
-            System.getProperty("test.src", "./") + "/" + pathToStores +
-                "/" + trustStoreFile;
+
+        String keyFilename = TESTROOT +  "/" + pathToStores + "/" + keyStoreFile;
+        String trustFilename = TESTROOT + "/" + pathToStores + "/" +
+            trustStoreFile;
         System.setProperty("javax.net.ssl.keyStore", keyFilename);
         System.setProperty("javax.net.ssl.keyStorePassword", passwd);
         System.setProperty("javax.net.ssl.trustStore", trustFilename);
@@ -97,7 +98,7 @@ abstract public class TLSBase {
     private static KeyManager[] getKeyManager(boolean empty) throws Exception {
         FileInputStream fis = null;
         if (!empty) {
-            fis = new FileInputStream(System.getProperty("test.src", "./") + "/" + pathToStores +
+            fis = new FileInputStream(System.getProperty("test.root", "./") + "/" + pathToStores +
                 "/" + keyStoreFile);
         }
         // Load the keystore
@@ -113,7 +114,7 @@ abstract public class TLSBase {
     private static TrustManager[] getTrustManager(boolean empty) throws Exception {
         FileInputStream fis = null;
         if (!empty) {
-            fis = new FileInputStream(System.getProperty("test.src", "./") + "/" + pathToStores +
+            fis = new FileInputStream(System.getProperty("test.root", "./") + "/" + pathToStores +
                 "/" + trustStoreFile);
         }
         // Load the keystore
@@ -323,17 +324,36 @@ abstract public class TLSBase {
          * @param tm - true sets an empty trust manager
          */
         Client(boolean km, boolean tm) {
+            this(km, tm, true);
+        }
+
+        Client(boolean km, boolean tm, boolean connect) {
             super();
             this.km = km;
             this.tm = tm;
-            connect();
+            if (connect) {
+                this.sock = connect();
+            }
         }
 
-        // Connect to server.  Maybe runnable in the future
         public SSLSocket connect() {
             try {
                 sslContext = SSLContext.getInstance("TLS");
                 sslContext.init(TLSBase.getKeyManager(km), TLSBase.getTrustManager(tm), null);
+            } catch (Exception ex) {
+                ex.printStackTrace();
+            }
+            return getNewSocket();
+        }
+
+        public SSLSession getSession() {
+            return sock.getSession();
+        }
+
+        // Connect to server.  Maybe runnable in the future
+        private SSLSocket getNewSocket() {
+            try {
+
                 sock = (SSLSocket)sslContext.getSocketFactory().createSocket();
                 sock.connect(new InetSocketAddress(InetAddress.getLoopbackAddress(), serverPort));
                 System.err.println("Client connected using port " +
@@ -345,6 +365,10 @@ abstract public class TLSBase {
                 ex.printStackTrace();
             }
             return sock;
+        }
+
+        public SSLSession getNewSession() {
+            return getNewSocket().getSession();
         }
 
         // Read from the client socket
