@@ -67,6 +67,13 @@
   develop(bool, StressMethodHandleLinkerInlining, false,                    \
           "Stress inlining through method handle linkers")                  \
                                                                             \
+  develop(bool, StressBailout, false,                                       \
+          "Perform bailouts randomly at C2 failing() checks")               \
+                                                                            \
+  develop(uint, StressBailoutProbability, 100000,                           \
+          "Stress bailout every n:th time on average")                      \
+          range(1, max_juint)                                               \
+                                                                            \
   develop(intx, OptoPrologueNops, 0,                                        \
           "Insert this many extra nop instructions "                        \
           "in the prologue of every nmethod")                               \
