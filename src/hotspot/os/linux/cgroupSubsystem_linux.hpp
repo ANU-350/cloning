@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, 2023, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2019, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -62,12 +62,17 @@
 #define INVALID_CGROUPS_GENERIC  6
 
 // Five controllers: cpu, cpuset, cpuacct, memory, pids
-#define CG_INFO_LENGTH 5
-#define CPUSET_IDX     0
-#define CPU_IDX        1
-#define CPUACCT_IDX    2
-#define MEMORY_IDX     3
-#define PIDS_IDX       4
+enum CG_INFO {
+  CG_INFO_INVALID = -1,
+  CG_INFO_START = 0,
+  CPUSET_IDX = 0,
+  CPU_IDX,
+  CPUACCT_IDX,
+  MEMORY_IDX,
+  PIDS_IDX, // pids is not required
+  CG_INFO_REQUIRED_END = PIDS_IDX,
+  CG_INFO_LENGTH = PIDS_IDX + 1
+};
 
 #define CONTAINER_READ_NUMBER_CHECKED(controller, filename, log_string, retval)       \
 {                                                                                     \
@@ -102,7 +107,7 @@
   log_trace(os, container)(log_string " is: %s", retval);                                 \
 }
 
-class CgroupController: public CHeapObj<mtInternal> {
+class CgroupController : public CHeapObj<mtInternal> {
   public:
     virtual char* subsystem_path() = 0;
 
@@ -249,6 +254,12 @@ class CgroupInfo : public StackObj {
       _mount_path = nullptr;
     }
 
+    ~CgroupInfo() {
+      os::free(_name);
+      os::free(_cgroup_path);
+      os::free(_root_mount_path);
+      os::free(_mount_path);
+    }
 };
 
 class CgroupSubsystemFactory: AllStatic {
@@ -282,7 +293,6 @@ class CgroupSubsystemFactory: AllStatic {
                                const char* proc_self_cgroup,
                                const char* proc_self_mountinfo,
                                u1* flags);
-    static void cleanup(CgroupInfo* cg_infos);
 };
 
 #endif // CGROUP_SUBSYSTEM_LINUX_HPP

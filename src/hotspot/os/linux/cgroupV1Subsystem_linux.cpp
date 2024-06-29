@@ -22,13 +22,11 @@
  *
  */
 
+#include "precompiled.hpp"
 #include <string.h>
-#include <math.h>
-#include <errno.h>
 #include "cgroupV1Subsystem_linux.hpp"
 #include "logging/log.hpp"
 #include "memory/allocation.hpp"
-#include "runtime/globals.hpp"
 #include "runtime/os.hpp"
 #include "utilities/globalDefinitions.hpp"
 #include "os_linux.hpp"
@@ -81,7 +79,6 @@ jlong CgroupV1MemoryController::uses_mem_hierarchy() {
 }
 
 void CgroupV1MemoryController::set_subsystem_path(char *cgroup_path) {
-  CgroupV1Controller::set_subsystem_path(cgroup_path);
   jlong hierarchy = uses_mem_hierarchy();
   if (hierarchy > 0) {
     set_hierarchical(true);

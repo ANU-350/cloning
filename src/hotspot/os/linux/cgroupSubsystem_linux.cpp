@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, 2023, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2019, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -22,6 +22,7 @@
  *
  */
 
+#include "precompiled.hpp"
 #include <string.h>
 #include <math.h>
 #include <errno.h>
@@ -29,9 +30,7 @@
 #include "cgroupV1Subsystem_linux.hpp"
 #include "cgroupV2Subsystem_linux.hpp"
 #include "logging/log.hpp"
-#include "memory/allocation.hpp"
 #include "os_linux.hpp"
-#include "runtime/globals.hpp"
 #include "runtime/os.hpp"
 #include "utilities/globalDefinitions.hpp"
 
@@ -39,11 +38,6 @@
 static const char* cg_controller_name[] = { "cpu", "cpuset", "cpuacct", "memory", "pids" };
 
 CgroupSubsystem* CgroupSubsystemFactory::create() {
-  CgroupV1MemoryController* memory = nullptr;
-  CgroupV1Controller* cpuset = nullptr;
-  CgroupV1Controller* cpu = nullptr;
-  CgroupV1Controller* cpuacct = nullptr;
-  CgroupV1Controller* pids = nullptr;
   CgroupInfo cg_infos[CG_INFO_LENGTH];
   u1 cg_type_flags = INVALID_CGROUPS_GENERIC;
   const char* proc_cgroups = "/proc/cgroups";
@@ -65,7 +59,6 @@ CgroupSubsystem* CgroupSubsystemFactory::create() {
     //       all controllers.
     CgroupController* unified = new CgroupV2Controller(cg_infos[MEMORY_IDX]._mount_path, cg_infos[MEMORY_IDX]._cgroup_path);
     log_debug(os, container)("Detected cgroups v2 unified hierarchy");
-    cleanup(cg_infos);
     return new CgroupV2Subsystem(unified);
   }
 
@@ -96,30 +89,27 @@ CgroupSubsystem* CgroupSubsystemFactory::create() {
    *
    */
   assert(is_cgroup_v1(&cg_type_flags), "Cgroup v1 expected");
-  for (int i = 0; i < CG_INFO_LENGTH; i++) {
-    CgroupInfo info = cg_infos[i];
-    if (info._data_complete) { // pids controller might have incomplete data
-      if (strcmp(info._name, "memory") == 0) {
-        memory = new CgroupV1MemoryController(info._root_mount_path, info._mount_path);
-        memory->set_subsystem_path(info._cgroup_path);
-      } else if (strcmp(info._name, "cpuset") == 0) {
-        cpuset = new CgroupV1Controller(info._root_mount_path, info._mount_path);
-        cpuset->set_subsystem_path(info._cgroup_path);
-      } else if (strcmp(info._name, "cpu") == 0) {
-        cpu = new CgroupV1Controller(info._root_mount_path, info._mount_path);
-        cpu->set_subsystem_path(info._cgroup_path);
-      } else if (strcmp(info._name, "cpuacct") == 0) {
-        cpuacct = new CgroupV1Controller(info._root_mount_path, info._mount_path);
-        cpuacct->set_subsystem_path(info._cgroup_path);
-      } else if (strcmp(info._name, "pids") == 0) {
-        pids = new CgroupV1Controller(info._root_mount_path, info._mount_path);
-        pids->set_subsystem_path(info._cgroup_path);
-      }
-    } else {
-      log_debug(os, container)("CgroupInfo for %s not complete", cg_controller_name[i]);
-    }
+  // The following are required to exist, determine_type will fail and return false otherwise.
+  CgroupV1MemoryController* memory = new CgroupV1MemoryController(cg_infos[MEMORY_IDX]._root_mount_path,
+                                                                  cg_infos[MEMORY_IDX]._mount_path,
+                                                                  cg_infos[MEMORY_IDX]._cgroup_path);
+  CgroupV1Controller* cpuset = new CgroupV1Controller(cg_infos[CPUSET_IDX]._root_mount_path,
+                                                      cg_infos[CPUSET_IDX]._mount_path,
+                                                      cg_infos[CPUSET_IDX]._cgroup_path);
+  CgroupV1Controller* cpu = new CgroupV1Controller(cg_infos[CPU_IDX]._root_mount_path,
+                                                   cg_infos[CPU_IDX]._mount_path,
+                                                   cg_infos[CPU_IDX]._cgroup_path);
+  CgroupV1Controller* cpuacct = new CgroupV1Controller(cg_infos[CPUACCT_IDX]._root_mount_path,
+                                                       cg_infos[CPUACCT_IDX]._mount_path,
+                                                       cg_infos[CPUACCT_IDX]._cgroup_path);
+  CgroupV1Controller* pids = nullptr;
+
+  if (cg_infos[PIDS_IDX]._data_complete) {
+    pids = new CgroupV1Controller(cg_infos[PIDS_IDX]._root_mount_path, cg_infos[PIDS_IDX]._mount_path, cg_infos[PIDS_IDX]._cgroup_path);
+  } else {
+    log_debug(os, container)("CgroupInfo for %s not complete", cg_controller_name[PIDS_IDX]);
   }
-  cleanup(cg_infos);
+
   return new CgroupV1Subsystem(cpuset, cpu, cpuacct, pids, memory);
 }
 
@@ -189,39 +179,32 @@ bool CgroupSubsystemFactory::determine_type(CgroupInfo* cg_infos,
     if (sscanf(p, "%s %d %*d %d", name, &hierarchy_id, &enabled) != 3) {
       continue;
     }
+    CG_INFO index = CG_INFO_INVALID;
     if (strcmp(name, "memory") == 0) {
-      cg_infos[MEMORY_IDX]._name = os::strdup(name);
-      cg_infos[MEMORY_IDX]._hierarchy_id = hierarchy_id;
-      cg_infos[MEMORY_IDX]._enabled = (enabled == 1);
+      index = MEMORY_IDX;
     } else if (strcmp(name, "cpuset") == 0) {
-      cg_infos[CPUSET_IDX]._name = os::strdup(name);
-      cg_infos[CPUSET_IDX]._hierarchy_id = hierarchy_id;
-      cg_infos[CPUSET_IDX]._enabled = (enabled == 1);
+      index = CPUSET_IDX;
     } else if (strcmp(name, "cpu") == 0) {
-      cg_infos[CPU_IDX]._name = os::strdup(name);
-      cg_infos[CPU_IDX]._hierarchy_id = hierarchy_id;
-      cg_infos[CPU_IDX]._enabled = (enabled == 1);
+      index = CPU_IDX;
     } else if (strcmp(name, "cpuacct") == 0) {
-      cg_infos[CPUACCT_IDX]._name = os::strdup(name);
-      cg_infos[CPUACCT_IDX]._hierarchy_id = hierarchy_id;
-      cg_infos[CPUACCT_IDX]._enabled = (enabled == 1);
+      index = CPUACCT_IDX;
     } else if (strcmp(name, "pids") == 0) {
       log_debug(os, container)("Detected optional pids controller entry in %s", proc_cgroups);
-      cg_infos[PIDS_IDX]._name = os::strdup(name);
-      cg_infos[PIDS_IDX]._hierarchy_id = hierarchy_id;
-      cg_infos[PIDS_IDX]._enabled = (enabled == 1);
+      index = PIDS_IDX;
+    }
+    if (index != CG_INFO_INVALID) {
+      cg_infos[index]._name = os::strdup(name);
+      cg_infos[index]._hierarchy_id = hierarchy_id;
+      cg_infos[index]._enabled = (enabled == 1);
     }
   }
   fclose(cgroups);
 
   is_cgroupsV2 = true;
   all_required_controllers_enabled = true;
-  for (int i = 0; i < CG_INFO_LENGTH; i++) {
-    // pids controller is optional. All other controllers are required
-    if (i != PIDS_IDX) {
-      is_cgroupsV2 = is_cgroupsV2 && cg_infos[i]._hierarchy_id == 0;
-      all_required_controllers_enabled = all_required_controllers_enabled && cg_infos[i]._enabled;
-    }
+  for (int i = 0; i < CG_INFO_REQUIRED_END; i++) {
+    is_cgroupsV2 = is_cgroupsV2 && cg_infos[i]._hierarchy_id == 0;
+    all_required_controllers_enabled = all_required_controllers_enabled && cg_infos[i]._enabled;
     if (log_is_enabled(Debug, os, container) && !cg_infos[i]._enabled) {
       log_debug(os, container)("controller %s is not enabled\n", cg_controller_name[i]);
     }
@@ -230,7 +213,6 @@ bool CgroupSubsystemFactory::determine_type(CgroupInfo* cg_infos,
   if (!all_required_controllers_enabled) {
     // one or more required controllers disabled, disable container support
     log_debug(os, container)("One or more required controllers disabled at kernel level.");
-    cleanup(cg_infos);
     *flags = INVALID_CGROUPS_GENERIC;
     return false;
   }
@@ -245,7 +227,6 @@ bool CgroupSubsystemFactory::determine_type(CgroupInfo* cg_infos,
   if (cgroup == nullptr) {
     log_debug(os, container)("Can't open %s, %s",
                              proc_self_cgroup, os::strerror(errno));
-    cleanup(cg_infos);
     *flags = INVALID_CGROUPS_GENERIC;
     return false;
   }
@@ -306,7 +287,6 @@ bool CgroupSubsystemFactory::determine_type(CgroupInfo* cg_infos,
   if (mntinfo == nullptr) {
       log_debug(os, container)("Can't open %s, %s",
                                proc_self_mountinfo, os::strerror(errno));
-      cleanup(cg_infos);
       *flags = INVALID_CGROUPS_GENERIC;
       return false;
   }
@@ -353,26 +333,22 @@ bool CgroupSubsystemFactory::determine_type(CgroupInfo* cg_infos,
         continue;
       }
       while ((token = strsep(&cptr, ",")) != nullptr) {
+        CG_INFO index = CG_INFO_INVALID;
         if (strcmp(token, "memory") == 0) {
-          any_cgroup_mounts_found = true;
-          set_controller_paths(cg_infos, MEMORY_IDX, token, tmpmount, tmproot);
-          cg_infos[MEMORY_IDX]._data_complete = true;
+          index = MEMORY_IDX;
         } else if (strcmp(token, "cpuset") == 0) {
-          any_cgroup_mounts_found = true;
-          set_controller_paths(cg_infos, CPUSET_IDX, token, tmpmount, tmproot);
-          cg_infos[CPUSET_IDX]._data_complete = true;
+          index = CPUSET_IDX;
         } else if (strcmp(token, "cpu") == 0) {
-          any_cgroup_mounts_found = true;
-          set_controller_paths(cg_infos, CPU_IDX, token, tmpmount, tmproot);
-          cg_infos[CPU_IDX]._data_complete = true;
+          index = CPU_IDX;
         } else if (strcmp(token, "cpuacct") == 0) {
-          any_cgroup_mounts_found = true;
-          set_controller_paths(cg_infos, CPUACCT_IDX, token, tmpmount, tmproot);
-          cg_infos[CPUACCT_IDX]._data_complete = true;
+          index = CPUACCT_IDX;
         } else if (strcmp(token, "pids") == 0) {
+          index = PIDS_IDX;
+        }
+        if (index != CG_INFO_INVALID) {
           any_cgroup_mounts_found = true;
-          set_controller_paths(cg_infos, PIDS_IDX, token, tmpmount, tmproot);
-          cg_infos[PIDS_IDX]._data_complete = true;
+          set_controller_paths(cg_infos, index, token, tmpmount, tmproot);
+          cg_infos[index]._data_complete = true;
         }
       }
     }
@@ -383,7 +359,6 @@ bool CgroupSubsystemFactory::determine_type(CgroupInfo* cg_infos,
   // No point in continuing.
   if (!any_cgroup_mounts_found) {
     log_trace(os, container)("No relevant cgroup controllers mounted.");
-    cleanup(cg_infos);
     *flags = INVALID_CGROUPS_NO_MOUNT;
     return false;
   }
@@ -391,7 +366,6 @@ bool CgroupSubsystemFactory::determine_type(CgroupInfo* cg_infos,
   if (is_cgroupsV2) {
     if (!cgroupv2_mount_point_found) {
       log_trace(os, container)("Mount point for cgroupv2 not found in /proc/self/mountinfo");
-      cleanup(cg_infos);
       *flags = INVALID_CGROUPS_V2;
       return false;
     }
@@ -403,29 +377,13 @@ bool CgroupSubsystemFactory::determine_type(CgroupInfo* cg_infos,
   // What follows is cgroups v1
   log_debug(os, container)("Detected cgroups hybrid or legacy hierarchy, using cgroups v1 controllers");
 
-  if (!cg_infos[MEMORY_IDX]._data_complete) {
-    log_debug(os, container)("Required cgroup v1 memory subsystem not found");
-    cleanup(cg_infos);
-    *flags = INVALID_CGROUPS_V1;
-    return false;
-  }
-  if (!cg_infos[CPUSET_IDX]._data_complete) {
-    log_debug(os, container)("Required cgroup v1 cpuset subsystem not found");
-    cleanup(cg_infos);
-    *flags = INVALID_CGROUPS_V1;
-    return false;
-  }
-  if (!cg_infos[CPU_IDX]._data_complete) {
-    log_debug(os, container)("Required cgroup v1 cpu subsystem not found");
-    cleanup(cg_infos);
-    *flags = INVALID_CGROUPS_V1;
-    return false;
-  }
-  if (!cg_infos[CPUACCT_IDX]._data_complete) {
-    log_debug(os, container)("Required cgroup v1 cpuacct subsystem not found");
-    cleanup(cg_infos);
-    *flags = INVALID_CGROUPS_V1;
-    return false;
+  for (int i = CG_INFO_START; i < CG_INFO_REQUIRED_END; i++) {
+    if (!cg_infos[i]._data_complete) {
+      log_debug(os, container)("Required cgroup v1 subsystem controller %s not found",
+                               cg_controller_name[i]);
+      *flags = INVALID_CGROUPS_V1;
+      return false;
+    }
   }
   if (log_is_enabled(Debug, os, container) && !cg_infos[PIDS_IDX]._data_complete) {
     log_debug(os, container)("Optional cgroup v1 pids subsystem not found");
@@ -435,16 +393,6 @@ bool CgroupSubsystemFactory::determine_type(CgroupInfo* cg_infos,
   *flags = CGROUPS_V1;
   return true;
 };
-
-void CgroupSubsystemFactory::cleanup(CgroupInfo* cg_infos) {
-  assert(cg_infos != nullptr, "Invariant");
-  for (int i = 0; i < CG_INFO_LENGTH; i++) {
-    os::free(cg_infos[i]._name);
-    os::free(cg_infos[i]._cgroup_path);
-    os::free(cg_infos[i]._root_mount_path);
-    os::free(cg_infos[i]._mount_path);
-  }
-}
 
 /* active_processor_count
  *

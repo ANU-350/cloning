@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, 2023, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2019, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -41,34 +41,33 @@ class CgroupV1Controller: public CgroupController {
     char *_path;
 
   public:
-    CgroupV1Controller(char *root, char *mountpoint) {
-      _root = os::strdup(root);
-      _mount_point = os::strdup(mountpoint);
-      _path = nullptr;
-    }
+    void set_subsystem_path(char *cgroup_path);
 
-    virtual void set_subsystem_path(char *cgroup_path);
-    char *subsystem_path() { return _path; }
+    CgroupV1Controller(char* root, char* mountpoint, char* cgroup_path)
+      : _root(os::strdup(root)),
+        _mount_point(os::strdup(mountpoint)),
+        _path(nullptr) {
+        set_subsystem_path(cgroup_path);
+      }
+      char *subsystem_path() { return _path; }
 };
 
 class CgroupV1MemoryController: public CgroupV1Controller {
-
-  public:
-    bool is_hierarchical() { return _uses_mem_hierarchy; }
-    void set_subsystem_path(char *cgroup_path);
-  private:
     /* Some container runtimes set limits via cgroup
      * hierarchy. If set to true consider also memory.stat
      * file if everything else seems unlimited */
     bool _uses_mem_hierarchy;
     jlong uses_mem_hierarchy();
     void set_hierarchical(bool value) { _uses_mem_hierarchy = value; }
+    void set_subsystem_path(char *cgroup_path);
 
   public:
-    CgroupV1MemoryController(char *root, char *mountpoint) : CgroupV1Controller(root, mountpoint) {
-      _uses_mem_hierarchy = false;
+    bool is_hierarchical() { return _uses_mem_hierarchy; }
+    CgroupV1MemoryController(char* root, char* mountpoint, char* cgroup_path)
+    : CgroupV1Controller(root, mountpoint, cgroup_path),
+      _uses_mem_hierarchy(false) {
+      set_subsystem_path(cgroup_path);
     }
-
 };
 
 class CgroupV1Subsystem: public CgroupSubsystem {
